@@ -2,7 +2,7 @@
 
 > Kotlin/Native 的 HTTP 协议库：通用 HTTP 类型、HTTP/1.1、HTTP/2，以及建在 `quic` 之上的 HTTP/3。底层是 `com.netonstream:io`。
 > 仓库 `http`。
-> 状态：草案 v0（2026-09-27，待评审；评审通过前不写代码）。
+> 状态：草案 v1（2026-09-27，按 GPT 评审修订：HTTP/3 头部的三种上限分开、不继承参考跳过的测试；待评审）。
 
 ## 0. 依据与范围
 
@@ -389,7 +389,7 @@ com.netonstream:io（IoStream / Framed / Buffer / Bytes / 反应器 / 准入 / �
 - **帧**：DATA、HEADERS、CANCEL_PUSH、SETTINGS、PUSH_PROMISE、GOAWAY、MAX_PUSH_ID、WEBTRANSPORT_BI_STREAM ✅。
   - HTTP/2 专有类型 → H3_FRAME_UNEXPECTED；未知类型与 GREASE 帧跳过。
   - DATA 流式处理，不缓存负载。
-  - HEADERS 先整体缓存再解码 ✅，但参考不限制其长度，本库以 `maxFieldSectionSize` 限制 ⚖️（见下）。
+  - HEADERS：参考先把整个帧缓存进 `BufList` 再解码，且不限制帧长。本库的限制见下文"头部的三种上限" ⚖️。
 - **SETTINGS** ✅：最多 8 项，重复 → 错误，HTTP/2 保留 ID → H3_SETTINGS_ERROR，未知 ID 忽略；GREASE 设置；控制流上 SETTINGS 必须是第一帧，第二个 SETTINGS 以及 DATA / HEADERS → H3_FRAME_UNEXPECTED。
 - **单向流** ✅：
   - 控制、推送、QPACK 编码器、QPACK 解码器、WebTransport。
@@ -411,7 +411,14 @@ com.netonstream:io（IoStream / Framed / Buffer / Bytes / 反应器 / 准入 / �
 - **h3-datagram（RFC 9297）与 h3-webtransport（仅服务端）**：参考标为实验性，本库同样实验性 ✅。
 - **配置**（`config.rs`）：
   - `sendGrease` true ✅；`enableExtendedConnect` / `enableWebtransport` / `enableDatagram` false ✅；`maxWebtransportSessions` 0 ✅。
-  - `maxFieldSectionSize`：参考默认不设上限（VarInt 最大值）。本库默认 64 KiB ⚖️（资源有界，与 HTTP/1.1 的头部段上限一致）。
+  - **头部的三种上限**（⚖️；参考只有 `max_field_section_size`，默认不设上限）：HEADERS 帧编码后的字节数与 QPACK 解码后的字段段大小是两个不同的量，
+    分别设限，并在收包与解码过程中逐步检查（超出即停止，不先整体分配再检查）：
+    - `maxHeadersFrameSize`：HEADERS 帧负载（编码后）的字节上限，默认 64 KiB。帧头声明的长度超出即拒绝，不读取负载。
+    - `maxFieldSectionSize`：解码后字段段的大小（按 RFC 9114 的计法：每个字段名 + 值 + 32），默认 64 KiB。也通过
+      SETTINGS_MAX_FIELD_SECTION_SIZE 通告给对端；解码时逐字段累加，超出即停止解码。
+    - `maxFieldCount`：字段个数上限，默认 100（与 HTTP/1.1 的头部个数一致）；解码时逐个计数。
+    - 超出任一上限：服务端回 431 并按参考的方式结束该请求流；客户端 → 错误。
+    - HTTP/2 的对应物：`maxHeaderListSize`（解码后）与 CONTINUATION 帧数上限（编码后）已按参考分开（§4.1），HTTP/1.1 的头部段与头部个数也已分开（§3.7）。
 - **参考的缺口**（首版照参考、在此列明）：
   - 不支持服务端推送（解析存在，服务端忽略 MAX_PUSH_ID / CANCEL_PUSH）。
   - 不支持 1xx。
@@ -433,9 +440,19 @@ com.netonstream:io（IoStream / Framed / Buffer / Bytes / 反应器 / 准入 / �
 | h2 模块内测试与 HPACK 一致性 | 约 59 + fixtures | `fixtures/hpack/` 中各实现的 JSON 用例（go、haskell、nghttp2、node、python 等） |
 | h3 | 19 + 38 + 约 113 | 连接（设置、控制流错误、GOAWAY）、请求、QPACK 与帧 |
 | 模糊测试 | httparse 6、http 1、h2 3（客户端、端到端、HPACK）、h3 1（varint） | 语料按参考 |
-| 外部一致性 | h2spec v2.1.1、h3spec v0.1.13（同样跳过参考跳过的 5 项） | 纳入验收 |
+| 外部一致性 | h2spec v2.1.1、h3spec v0.1.13 | 纳入验收；不继承参考的跳过项，见下 |
 
-- **有意不同项各有测试**：§3.9 表中每一行加粗的默认值；§5 补上的四项头部校验。
+- **跳过项不继承**：参考在 CI 中跳过的外部一致性用例，不自动成为本库的验收豁免。每一项在本表中记录跳过的原因、对本库是否适用、替代验证；
+  默认必须通过。h3spec 中参考跳过的五项：
+  | 用例 | 参考跳过的原因 | 对本库 | 验收 |
+  |---|---|---|---|
+  | 请求流上的 CANCEL_PUSH | 参考不校验 | 适用：应以 H3_FRAME_UNEXPECTED 拒绝 | 必须通过 |
+  | QPACK 容量上限 | 参考未接入动态表 | 适用：本库通告容量 0，对端写入超出容量的指令应以 QPACK_ENCODER_STREAM_ERROR 拒绝 | 必须通过；另加单元测试 |
+  | Insert Count Increment 为 0 | 同上 | 适用：应以 QPACK_DECODER_STREAM_ERROR 拒绝 | 必须通过；另加单元测试 |
+  | 重复的伪头部 | 参考不校验 | 适用：本库补上此项校验（§5） | 必须通过 |
+  | missing_extension TLS 告警 | 取决于 TLS 实现 | 取决于 `quic` 的 TLS 选择（`quic` SPEC §4） | TLS 选定后必须通过；在此之前记为未验证，不记为豁免 |
+  h2spec 在参考中没有跳过项，本库全部必须通过。
+- **有意不同项各有测试**：§3.9 表中每一行加粗的默认值；§5 补上的四项头部校验；§5 的三种头部上限（每种在编码 / 解码的逐步检查中触发）。
 - **修订 3 的请求走私向量**逐个断言。
 - **每个字节边界拆分到达**的模糊测试。
 - **100 MB 上传**：`maxRequestBodySize` 显式调到 200 MiB，handler 流式读完并核对长度与校验和，同时断言服务端 RSS 增长 ≤ 16 MiB；默认上限下另测 413 并关闭。
