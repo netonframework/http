@@ -697,4 +697,7 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
     12.1–13.1 MiB（3 次），上限 16 MiB。余量不大，且主要取决于 GC 的回收节奏：大于 16 KiB 的数据帧以切片交出，下一次读换新的整缓冲数组，
     上传期间持续产生垃圾。在全量测试中运行时堆已被先前的测试撑大，增长读数接近 0，该断言只在单独运行时有判别力。上传路径每 MB 的分配量
     尚未测量，列为后续项。
-  - 与 `curl` 互通（h1、h2 明文）尚未做：h2 部分等 hyper 的 h2 接线合入后一并进行。
+  - 与 `curl` 互通（HTTP/1.x，curl 7.76.1，153，epoll 与 io_uring 各 14 项全过）：`http-bench/curl-interop.sh` 对 `echoServer` 运行，
+    核对服务看到的方法 / 目标 / 版本 / 请求体长度与 FNV-1a 校验和、以及 curl 收到的内容：GET、HTTP/1.0、小 POST、5 MB POST（curl 的
+    `Expect: 100-continue`，确认收到 100）、chunked 上传、`-T -` 的 PUT、chunked 响应、1 MiB 响应、HEAD（有长度无体）、保活复用、Date 头、
+    未知版本 400。h2 明文部分等 hyper 的 h2 接线合入后进行（153 上的 curl 带 nghttp2）。
