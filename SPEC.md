@@ -416,7 +416,8 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 
 ## 5. HTTP/3（复刻 `h3` 0.0.8，在 `neton.quic` 上）
 
-> **状态：计划范围，尚未实现（2026-09-29）。** 本节的 ✅ 表示"已与参考对照、决定照做"，不表示已实现；实现进度见 §11。
+> **状态：第 1 层（纯编解码，阶段 A）已实现；连接层、QUIC 接入与互通尚未实现（2026-09-29）。** 本节的 ✅ 表示"已与参考对照、决定照做"，
+> 不表示已实现；实现进度见 §11。
 > 依赖的 QUIC 仍以 TLS 测试替身运行（quic SPEC §11.5–11.8），真实 TLS 未接入；HTTP/3 的最终验收以真实 QUIC 与外部 HTTP/3 实现互通为准。
 
 - **首版范围（评审确定，2026-09-29）**：
@@ -820,4 +821,109 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   - HeaderMap 每项名字与首个值并排存于一个数组（每个映射少一次分配）：153 上 hello 11,515 → 约 11,316、浏览器式 25,508 → 约 25,334
     （各两轮交替）；虚拟机上浏览器式 −1.2%、hello 不变。
   - `Buffer.writeBytes` 对 ≤ 16 字节用重叠的字搬运代替 `memmove`（neton-io 实验）：虚拟机与 153 都无收益（153 上 hello 略差），已弃用。
+
+**HTTP/3 阶段 A：纯协议核心（2026-09-29，h3 0.0.8，§5 分层验收第 1 层）**
+- 范围：不做 I/O、不接 QUIC，字节 / 事件进、字节 / 事件出。**连接层（控制流与请求流状态机、GOAWAY、关键流规则、431 应答）、QUIC 接入
+  （`neton.quic` 与薄接口）、端到端测试与外部互通（curl `--http3`、quiche / nghttp3 / quinn-h3、h3spec）均未做**，分别是第 2–4 层。
+- 已实现（模块 `:http3`，`neton.http.h3`，全部在 commonMain）：
+  - `proto.VarInt`（`proto/varint.rs`、`coding.rs`）：值为 `Long`，输入不足返回 `INCOMPLETE`（-1），不抛异常、不分配。
+  - `Code` 与 `H3Exception`（`error/codes.rs`）：H3_DATAGRAM_ERROR、0x100–0x110、QPACK 0x200–0x202；各层错误都是带 `code` 的
+    `H3Exception` 子类，只在出错路径上抛出，"输入不足"一律用返回值表示。
+  - 帧（`proto/frame.rs`）：DATA、HEADERS、CANCEL_PUSH、SETTINGS、PUSH_PROMISE（只解析）、GOAWAY、MAX_PUSH_ID、GREASE；`FrameDecoder`
+    （`frame.rs` 的 `FrameDecoder` 与 `Frame::decode`）与 `FrameStream`（`FrameStream` 的无 I/O 版本：`onData` / `onEnd` 输入，
+    `nextFrame` / `nextData` 输出，DATA 负载按到达分段交出、不整体缓存）。
+  - SETTINGS：至多 8 项，重复 → H3_SETTINGS_ERROR，HTTP/2 保留 ID（0、2–5）→ H3_SETTINGS_ERROR，未知 ID 与 GREASE 忽略，发送侧可加 GREASE。
+  - 单向流（`proto/stream.rs`、`stream.rs` 的编解码部分）：`StreamType`、`StreamId`、`UniStreamHeader`（控制流带 SETTINGS、QPACK 编码器 /
+    解码器流）、`StreamTypeDecoder`（流类型与推送 ID，可分段到达）、`WriteBuf`（帧头与负载分开，负载不复制）。
+  - QPACK（`qpack/`）：前缀整数、前缀字符串（霍夫曼）、`HeaderField`、静态表、字段行表示（`block.rs`）、无状态编码器 / 解码器、编码器 /
+    解码器流指令（`stream.rs`）及对端两条流的接收校验（`EncoderStreamReceiver` / `DecoderStreamReceiver`）。
+  - 头部（`proto/headers.rs`）：`Header` / `Pseudo` / `Protocol`，请求与响应的构造与拆解，按字段行逐行校验，类型化的 QPACK 编码。
+- 霍夫曼：复用 `neton.http.h2.hpack` 的实现，不另写一份。`:http` 新增 `neton.http.internal.HuffmanCodec`（只转调 HPACK 的
+  `huffmanDecode` / `huffmanEncode` / `huffmanEncodedLength`），以 `@RequiresOptIn(level = ERROR)` 的 `@InternalHttpApi` 标注，KDoc
+  说明仅供本仓库模块使用；`:http` 其余代码未改，全量测试仍为 1,197 个（14 个忽略）、0 失败。
+- 测试：`:http3` macOS 160 个全部通过（`./gradlew :http3:macosArm64Test`），linuxX64 编译通过。参考测试逐文件：
+  | 参考文件 | 参考测试数 | 移植 | 不适用 | 本库另加 |
+  |---|---|---|---|---|
+  | `proto/frame.rs` | 10 | 10 | 0 | 15（限额、单 varint 帧、HTTP/2 帧、未知帧边到边丢弃、SETTINGS 规则） |
+  | `frame.rs` | 12 | 12（2 个按 ⚖️ 改断言） | 0 | 4（每个字节边界拆分、流在未知帧中结束、干净结束、大 DATA 流式） |
+  | `stream.rs` | 6 | 5 | 1 | 7（`WriteBuf`、流类型解码、流 ID） |
+  | `buf.rs` | 1 | 0 | 1 | — |
+  | `proto/headers.rs` | 8 | 8 | 0 | 10（四项 ⚖️ 校验、非法名 / 值、请求构造、QPACK 往返、校验与限额同时作用） |
+  | `qpack/prefix_int.rs` | 8 | 8 | 0 | 2 |
+  | `qpack/prefix_string/mod.rs` | 5 | 5 | 0 | 2 |
+  | `qpack/prefix_string/decode.rs` | 3 | 2（均按 ⚖️ 改断言） | 1 | — |
+  | `qpack/prefix_string/encode.rs` | 5 | 4 | 1 | — |
+  | `qpack/field.rs` | 2 | 2 | 0 | — |
+  | `qpack/static_.rs` | 6 | 6 | 0 | 1（每一项按字节、按类型化名字查找） |
+  | `qpack/block.rs` | 9 | 9 | 0 | 2 |
+  | `qpack/encoder.rs` | 14 | 7（解码器流 5 个中 3 个按 ⚖️ 改断言） | 7 | — |
+  | `qpack/decoder.rs` | 17 | 7（3 个按 ⚖️ 改断言） | 10 | — |
+  | `qpack/stream.rs` | 7 | 7 | 0 | — |
+  | `qpack/tests.rs` | 4 | 2 | 2 | — |
+  | `qpack/dynamic.rs` | 42 | 0 | 42 | — |
+  | `qpack/vas.rs` | 11 | 0 | 11 | — |
+  | 模糊测试 `fuzz/fuzz_targets/fuzz_varint.rs` | 1 | 1（2 个测试） | 0 | — |
+  | 合计 | 170 + 1 | 94 + 1 | 76 | |
+  - QPACK 编解码与流的另加测试在 `CodecTest`（10 个）与 `QpackStreamsTest`（7 个），`VarIntTest` 3 个、`CodeTest` 1 个（参考的
+    `varint.rs`、`coding.rs`、`proto/stream.rs`、`error/codes.rs` 没有测试）。
+  - `fuzz_varint` 移植为 `VarIntFuzzTest`（风格同 `ParseFuzzTest`）：参考语料 116 个文件（`VarInt::decode` 至多读 8 字节，故保留每个文件的
+    前 8 字节与长度）加固定种子的 20,000 个随机输入；断言不越界、`INCOMPLETE` 恰在输入短于首字节声明的长度时出现、消耗字节数正确、
+    重新编码为最短形式后值不变。
+  - 参考中 `tests/connection.rs`（19）与 `tests/request.rs`（38）属连接层，留到第 2 层。
+- 不适用的参考测试（76 个）及理由：
+  - `qpack/dynamic.rs` 42、`qpack/vas.rs` 11：动态 QPACK 不在首版（§5 首版不做）。
+  - `qpack/encoder.rs` 的 `encode_static_nameref`、`encode_static_nameref_indexed_in_dynamic`、`encode_dynamic_insert`、
+    `encode_dynamic_insert_nameref`、`encode_literal_nameref`、`encode_literal_postbase_nameref`、`encode_with_header_block`：
+    都在动态表中插入或引用。对应的无动态表行为另有测试（如 `location: /bar` 编为带静态名字引用的字面量）。
+  - `qpack/decoder.rs` 的 `test_insert_field_with_name_ref_into_dynamic_table`、`test_insert_field_without_name_ref`、
+    `test_duplicate_field`、`test_dynamic_table_size_update`、`decode_indexed_header_field`、`decode_post_base_indexed`、
+    `decode_name_ref_header_field`、`decode_post_base_name_ref_header_field`、`decode_single_pass_encoded`、
+    `largest_ref_greater_than_max_entries`：都要求插入成功或解码动态引用；容量 0 下它们的输入分别以 QPACK_ENCODER_STREAM_ERROR /
+    QPACK_DECOMPRESSION_FAILED 拒绝，另有测试。
+  - `qpack/tests.rs` 的 `blocked_header`、`codec_table_full`：动态表（阻塞流、表满）。
+  - `qpack/prefix_string/decode.rs` 的 `test_read_bits`、`encode.rs` 的 `test_set_bits`：测试参考逐位编解码器的内部函数；本库用 HPACK 的
+    查表实现，没有这两个函数（其行为由其余霍夫曼测试覆盖）。
+  - `stream.rs` 的 `write_wt_uni_header`：WebTransport 不在首版。
+  - `buf.rs` 的 `cursor_advance`：`BufList` 游标。本库收到的字节进一个 neton-io `Buffer`（传输层可直接读入），没有 `BufList`。
+- ⚖️ 有意不同（均有测试）：
+  - 帧：
+    - 未知类型（含 GREASE）的帧按到达逐段丢弃，不缓存；参考先把整个帧（任意声明长度）缓存再跳过。
+    - HEADERS 与 PUSH_PROMISE 的声明长度超过 `maxHeadersFrameSize`（默认 64 KiB）→ `FrameError.HeadersTooLarge`，读到帧头即拒绝，不读负载
+      （§5"头部的三种上限"）。服务端据此回 431 还是复位由连接层决定（第 2 层）；异常所带的码为 H3_EXCESSIVE_LOAD，仅在连接层选择复位时使用。
+    - SETTINGS 负载上限 16 KiB（`MAX_SETTINGS_PAYLOAD`，超出 → H3_EXCESSIVE_LOAD）；参考不设上限。
+    - CANCEL_PUSH / GOAWAY / MAX_PUSH_ID 的负载必须恰为一个 varint，多余或缺少字节 → H3_FRAME_ERROR（RFC 9114 §7.1），声明长度超过 8 读到
+      帧头即拒绝。**发现参考的缺陷**：参考只读出 varint，负载中多余的字节留在流中被当作下一帧解析；负载为空时返回 `Incomplete(0)`，
+      解码器从此永远等待。
+    - HTTP/2 专有帧类型读到帧头即以 H3_FRAME_UNEXPECTED 拒绝，不等负载到齐。
+    - `WEBTRANSPORT_BI_STREAM`（0x41）没有 WebTransport 时按未知帧（带长度）跳过；`WEBTRANSPORT_UNI` 流类型按未知类型处理，不再读会话 ID。
+  - `FrameStream`：收到的字节进同一个 `Buffer`，DATA 负载在读取时把已到达的字节一并交出，不保留参考 `BufList` 的分块边界。
+    `poll_data_split` 与 `poll_data_eos_but_buffered_data` 因此改为断言交出的字节拼起来是 `body`（另测分块在两次读取之间到达时逐块交出）。
+    流结束时 DATA 负载不足一律为 UnexpectedEnd（参考在缓冲为空时静默返回 `None`）。
+  - `Settings.get` 只查已有条目；参考扫描整个定长数组，`get(0)` 会命中空槽的 0。
+  - 霍夫曼（共用 HPACK 实现）执行 RFC 7541 §5.2：填充超过 7 位或含 EOS 即错误，参考不查。参考 `test_decode_single_value` 中 18 个向量以
+    一整个字节的 1 作填充，`test_decode_all_code_joined` 以完整的 30 位 EOS 结尾，本库均判为错误；移植的测试断言这一点，并断言去掉
+    多余填充 / EOS 后解出原符号（向量由参考源码中的表达式求值得到，逐字节一致）。
+  - QPACK 解码：
+    - Required Insert Count 非 0 即 QPACK_DECOMPRESSION_FAILED（`MissingRefs(编码值)`），即使字段行都不引用动态表（RFC 9204 §4.5.1.1，
+      最大容量为 0 时编码值必须为 0）；参考的无状态解码忽略前缀。`largest_ref_too_big` 因此断言 `MissingRefs(9)`（参考的有状态解码器
+      报 `MissingRefs(8)`）。Base 任意（§4.5.1.2）。
+    - `maxFieldSectionSize`（默认 64 KiB，名 + 值 + 32 累加）与 `maxFieldCount`（默认 100）逐行检查：个数在解码该行之前检查，大小在该行
+      解出后、交给接收者之前检查，超出即停止，其后的字节不再解码；参考只有前者。两者为 `isLimit` 错误（`HeaderTooLong` /
+      `TooManyFields`），供连接层回 431，不是 QPACK_DECOMPRESSION_FAILED。
+    - 解码逐行交给 `FieldSink`，名与值是输入、静态表或复用的临时数组中的区间，每行不分配；参考先解出 `Vec<HeaderField>`。
+  - QPACK 编码器流（对端编码器 → 本端，本端通告容量 0）：Set Dynamic Table Capacity 大于 0 → QPACK_ENCODER_STREAM_ERROR；任何插入 →
+    QPACK_ENCODER_STREAM_ERROR（静态索引越界报 `InvalidStaticIndex`，动态索引报 `BadRelativeIndex`，其余为 `InsertionExceedsCapacity`）；
+    Duplicate → `BadRelativeIndex`。插入在名字引用（或名字长度）到齐时即拒绝，不等值字符串，避免对端声明巨长字符串让流缓存；参考解析完整
+    指令。`enc_recv_buf_too_short`（`0b1000_0000` 在参考中等待、在本库立即以 `BadRelativeIndex(0)` 拒绝）与
+    `enc_recv_accepts_truncated_messages`（名字长度未到齐时等待、到齐即拒绝；指令编解码本身仍接受截断输入）按此改断言。
+  - QPACK 解码器流（对端解码器 → 本端，本端编码器从不插入、从不发送 Required Insert Count 非 0 的字段段）：Insert Count Increment 为 0 →
+    QPACK_DECODER_STREAM_ERROR（§4.4.3）；其他增量使 Known Received Count 超过已发送的 0 次插入，同样是错误（§4.4.3）；任何 Section
+    Acknowledgment 都是错误（§4.4.1）；Stream Cancellation 合法。参考的 `insert_count` 接受增量 4、`decoder_block_ack` 第一次确认成功，
+    本库均为错误，按此改断言。Insert Count Increment 按 64 位解析（参考为 `u8`，大于 64 即报溢出）。
+  - 头部四项校验（与 `neton.http.h2` 的解码一致，均为 H3_MESSAGE_ERROR）：重复的伪头部、普通字段之后的伪头部、连接相关字段（connection、
+    keep-alive、proxy-connection、transfer-encoding、upgrade，以及值不是 `trailers` 的 te）、content-length（用 h2 的 `parseU64`，至多
+    19 位；多个值必须相同；空值拒绝——h2 的 `parseU64` 把空值读作 0，RFC 9110 §8.6 要求至少一位数字）。解析出的值存于
+    `Header.contentLength`，供请求流核对 DATA 长度（第 2 层）。校验随解码逐行进行，遇到第一个不合法的行即停止。
+- 未决 / 留给第 2 层：HEADERS 过大与两种解码限额在服务端回 431 的具体流程；`Config`（`config.rs`）与本端 SETTINGS 的生成（通告
+  SETTINGS_MAX_FIELD_SECTION_SIZE、QPACK 容量 0）；控制流上 SETTINGS 必须为第一帧、帧在各类流上的允许性等流状态规则。
 
