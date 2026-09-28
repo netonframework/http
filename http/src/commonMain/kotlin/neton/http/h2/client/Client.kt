@@ -296,6 +296,7 @@ class Builder {
     private var streamId: StreamId = StreamId(1)
     private var localMaxErrorResetStreams: Int? = DEFAULT_LOCAL_RESET_COUNT_MAX
     private var dataFrameBudget: DataFrameBudget = DataFrameBudget.Auto
+    private var settingsAckTimeout: Duration? = null
 
     /** SETTINGS_INITIAL_WINDOW_SIZE: the receive window of each stream (default 65,535). */
     fun initialWindowSize(size: Int) = apply { settings.initialWindowSize = size.toLong() }
@@ -342,6 +343,12 @@ class Builder {
     /** The budget of small received DATA frames (default: half the connection window, at least 25,600). */
     fun dataFrameBudget(budget: Int) = apply { dataFrameBudget = DataFrameBudget.Configured(budget) }
 
+    /**
+     * ⚖️ Closes the connection with GOAWAY SETTINGS_TIMEOUT when our SETTINGS are not acknowledged within [timeout]
+     * (RFC 9113 §6.5.3); null (the default, as the reference) waits forever.
+     */
+    fun settingsAckTimeout(timeout: Duration?) = apply { settingsAckTimeout = timeout }
+
     /** The first stream ID (`initial_stream_id`, unstable in the reference); must be odd. */
     fun initialStreamId(streamId: Int) = apply {
         this.streamId = StreamId(streamId)
@@ -381,6 +388,7 @@ class Builder {
                 localErrorResetStreamsMax = localMaxErrorResetStreams,
                 settings = local,
                 dataFrameBudget = dataFrameBudget.resolve(initialTargetConnectionWindowSize),
+                settingsAckTimeout = settingsAckTimeout,
             ),
             Peer.Client,
         )

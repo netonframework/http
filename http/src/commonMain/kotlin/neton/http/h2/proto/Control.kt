@@ -31,6 +31,16 @@ internal class SettingsState(local: Settings) {
 
     private var hasReceivedRemoteInitialSettings = false
 
+    /**
+     * When the local SETTINGS waiting for their ACK were buffered (monotonic ns), or -1 when none waits (for the
+     * optional SETTINGS ACK timeout). The initial ones count from the handshake.
+     */
+    var waitingAckSince: Long = monotonicNanos()
+        private set
+
+    /** Called when new local SETTINGS start waiting for their ACK. */
+    var onSent: () -> Unit = {}
+
     /** Whether frames must be buffered before the next frame is read: an ACK to send, or new local settings. */
     val hasPending: Boolean get() = remote != null || localToSend != null
 
@@ -47,6 +57,7 @@ internal class SettingsState(local: Settings) {
             local.headerTableSize?.let { codec.setRecvHeaderTableSize(clampToInt(it)) }
             streams.applyLocalSettings(local)
             localWaitingAck = null
+            waitingAckSince = -1
         } else {
             // Every SETTINGS is acknowledged before more frames are read.
             check(remote == null)
@@ -85,6 +96,8 @@ internal class SettingsState(local: Settings) {
             check(dst.buffer(local) == null)
             localToSend = null
             localWaitingAck = local
+            waitingAckSince = monotonicNanos()
+            onSent()
         }
         return true
     }

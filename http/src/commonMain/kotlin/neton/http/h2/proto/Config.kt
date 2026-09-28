@@ -73,6 +73,8 @@ internal class ConnConfig(
     val localErrorResetStreamsMax: Int?,
     val settings: Settings,
     val dataFrameBudget: Int,
+    /** ⚖️ Close with GOAWAY SETTINGS_TIMEOUT when our SETTINGS are not acknowledged in time; null: never (the reference). */
+    val settingsAckTimeout: Duration? = null,
 )
 
 /** Configuration of the stream layer (`streams::Config`). */

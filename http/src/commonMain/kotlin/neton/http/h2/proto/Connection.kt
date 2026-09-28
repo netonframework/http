@@ -189,6 +189,7 @@ internal class Connection(
         try {
             coroutineScope {
                 val reader = launch(start = CoroutineStart.UNDISPATCHED) { readLoop() }
+                val watchdog = settingsAckTimeout?.let { t -> launch { settingsWatchdog(t) } }
                 try {
                     result = try {
                         drive()
@@ -199,6 +200,7 @@ internal class Connection(
                     completed = true
                 } finally {
                     reader.cancel()
+                    watchdog?.cancel()
                     io.close() // wakes a read parked on the stream
                 }
             }
@@ -215,6 +217,34 @@ internal class Connection(
             acceptWaiters.wake()
         }
         result?.let { throw it }
+    }
+
+    private val settingsAckTimeout: kotlin.time.Duration? = config.settingsAckTimeout
+    private val settingsSent = WaitSlot()
+
+    /**
+     * ⚖️ SETTINGS_TIMEOUT (RFC 9113 §6.5.3, SPEC §4.3): our SETTINGS not acknowledged within [timeout] is a
+     * connection error. The reference has no such timeout; the option is off by default.
+     */
+    private suspend fun settingsWatchdog(timeout: kotlin.time.Duration) {
+        settings.onSent = { settingsSent.wake() }
+        while (true) {
+            val since = settings.waitingAckSince
+            if (since < 0) {
+                settingsSent.await()
+                continue
+            }
+            val left = timeout.inWholeNanoseconds - (monotonicNanos() - since)
+            if (left > 0) {
+                kotlinx.coroutines.delay((left + 999_999) / 1_000_000)
+                continue
+            }
+            if (state == STATE_OPEN) {
+                handlePoll2Result(ProtoError.libraryGoAway(Reason.SETTINGS_TIMEOUT))?.let { fatal = it }
+                wakeDriver()
+            }
+            return
+        }
     }
 
     private fun wakeDriver() {

@@ -224,6 +224,7 @@ class Builder {
     private var maxSendBufferSize: Int = DEFAULT_MAX_SEND_BUFFER_SIZE
     private var localMaxErrorResetStreams: Int? = DEFAULT_LOCAL_RESET_COUNT_MAX
     private var dataFrameBudget: DataFrameBudget = DataFrameBudget.Auto
+    private var settingsAckTimeout: Duration? = null
 
     /** SETTINGS_INITIAL_WINDOW_SIZE: the receive window of each stream (default 65,535). */
     fun initialWindowSize(size: Int) = apply { settings.initialWindowSize = size.toLong() }
@@ -268,6 +269,12 @@ class Builder {
     fun dataFrameBudget(budget: Int) = apply { dataFrameBudget = DataFrameBudget.Configured(budget) }
 
     /**
+     * ⚖️ Closes the connection with GOAWAY SETTINGS_TIMEOUT when our SETTINGS are not acknowledged within [timeout]
+     * (RFC 9113 §6.5.3); null (the default, as the reference) waits forever.
+     */
+    fun settingsAckTimeout(timeout: Duration?) = apply { settingsAckTimeout = timeout }
+
+    /**
      * Sends the server SETTINGS and reads the client preface over [io] (`handshake`).
      * @throws H2Error an I/O error, an EOF before the preface, or a GOAWAY PROTOCOL_ERROR for an invalid preface.
      */
@@ -307,6 +314,7 @@ class Builder {
                 localErrorResetStreamsMax = localMaxErrorResetStreams,
                 settings = local,
                 dataFrameBudget = dataFrameBudget.resolve(initialTargetConnectionWindowSize),
+                settingsAckTimeout = settingsAckTimeout,
             ),
             Peer.Server,
         )
