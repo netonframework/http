@@ -597,3 +597,20 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 - Kotlin 形态（行为不变）：`Head` 打包进一个 Long（解析帧头不分配）、DATA 负载为 `Bytes` 切片、PING 负载为 Long、设置值为 `Long?`、伪头部值为
   String、`Headers.encode` 不消耗帧、错误为异常（`FrameException`、`ProtoError`、`StreamIdOverflow`）。⛔ 发送 PRIORITY 抛 `NotImplementedError`
   （同 h2 的 `unimplemented!()`）。
+
+**HTTP/1.1：hyper 集成测试移植（2026-09-28）**
+- `HyperServerTest` / `HyperClientTest` / `HyperIntegrationTest` / `HyperH1StreamTest`（+ `HyperSupport`）：`server.rs` 96 → 78（18 个仅 HTTP/2）、
+  `client.rs` 66 → 50（12 个 HTTP/2；`test_try_send_request` 只为 hyper-util 的旧客户端重试而存在；另 3 个的错误来自测试宏包装的旧客户端而非
+  hyper）、`integration.rs` 14 → 13（每个直连与经代理各一遍；`http2_parallel_10` 与各用例的 HTTP/2 运行跳过）、`h1_flush_before_yield` /
+  `h1_shutdown_while_buffered` / `unbuffered_stream` / `ready_on_poll_stream` 4 → 4。`chunked_response_trumps_length` 与参考一样忽略。合计 878 个测试
+  （6 个与参考一致地忽略），连续三次全过。
+- 适配：hyper 以 `without_shutdown` / `into_parts` 取回连接的测试改走 `OnUpgrade` + `downcast()`；`http1_only` 发送 HTTP/2 前言、断言 `VersionH2`；
+  空闲时 `gracefulShutdown` 由本库自己关闭传输；`max_buf_size_panic_too_small` 在 `serveConnection` 时失败；超时测试时间缩小 10 倍。
+- 测试发现并修正的缺陷 11 个：带体且 `Connection: close` 的请求后等待对端才关闭；用户 `transfer-encoding: chunked` 的空响应体缺结束块；
+  空闲超时改为 `HeaderTimeout` 错误（同 hyper 与 §3.7）；一次读入的完整头部超过 `maxBufSize` 未报 431；快速结束判断跳过解析使未完成头部的 ⚖️
+  上限（8 KiB 请求行 / 64 KiB 头部段）未检查；头部段上限先于 URI / 请求行上限检查，使结果随 TCP 切分而变；补 `, chunked` 时删除再添加改变了
+  头部顺序；以关闭结束的连接读完请求体后 `nextFrame()` 报 `IncompleteMessage`；客户端连接中途结束时消息体读取报 `Io` 而非 `IncompleteMessage`；
+  请求体出错使 `sendRequest` 报 `Canceled` 而非真实错误。另：读侧监视在升级交接时仍挂起一个读，会与升级后连接的读者冲突——请求要求升级时
+  不再启动监视（⚖️ 这类请求的客户端关闭在写出响应时才发现），有测试（无此修正时报"并发读"）。
+- ⚖️ 双跑：`http11UriTooLong`、`headerNameTooLong`、`maxBufSize`、`clientErrorParseTooLarge`、`headerReadTimeoutAsIdleTimeout` 各以放宽的选项按参考
+  断言、再以默认值按安全基线断言；`postWithChunkedOverflow` 断言 16 位十六进制上限的错误（参考为溢出）。
