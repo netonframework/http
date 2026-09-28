@@ -416,8 +416,8 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 
 ## 5. HTTP/3（复刻 `h3` 0.0.8，在 `neton.quic` 上）
 
-> **状态：第 1 层（纯编解码，阶段 A）与第 2 层（连接层接在薄 QUIC 接口上、以内存替身测试，阶段 B）已实现；QUIC 接入（阶段 C）与互通
-> （阶段 D）尚未实现（2026-09-29）。** 本节的 ✅ 表示"已与参考对照、决定照做"，
+> **状态：第 1 层（纯编解码，阶段 A）、第 2 层（连接层接在薄 QUIC 接口上、以内存替身测试，阶段 B）与第 3 层（接到 `neton.quic`、
+> 端到端测试，阶段 C，握手仍为 TLS 测试替身）已实现；互通（阶段 D）尚未实现，HTTP/3 尚未验收（2026-09-29）。** 本节的 ✅ 表示"已与参考对照、决定照做"，
 > 不表示已实现；实现进度见 §11。
 > 依赖的 QUIC 仍以 TLS 测试替身运行（quic SPEC §11.5–11.8），真实 TLS 未接入；HTTP/3 的最终验收以真实 QUIC 与外部 HTTP/3 实现互通为准。
 
@@ -1058,3 +1058,77 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
     `--http3`、quiche / nghttp3 / quinn-h3 双向互通与 h3spec（§6 中 h3spec 五项不继承跳过）。均未做。
   - 性能未测；不支持 1xx（同参考）；客户端不在本地让 ID 不小于收到的 GOAWAY ID 的进行中请求失败，而是等服务端拒绝（同参考）；替身不模拟
     流数上限（MAX_STREAMS）与乱序 / 丢包；编码前字段名小写化与 cookie 拆分仍照参考未做。
+
+**HTTP/3 阶段 C：接入 neton.quic 与端到端测试（2026-09-29，h3 0.0.8 + h3-quinn，§5 分层验收第 3 层）**
+- 范围：以 `com.netonstream:quic`（0.1.0-SNAPSHOT）实现薄 QUIC 接口（h3-quinn 的角色），HTTP/3 客户端与服务端在两个 neton.quic 端点之间经本机
+  回环 UDP 做端到端测试。**握手仍是 quic-testkit 中的 TLS 测试替身（MockTls），真实 TLS 尚不存在；与外部 HTTP/3 实现互通（curl `--http3`、
+  quiche / nghttp3 / quinn-h3）与 h3spec（阶段 D，第 4 层）均未做。HTTP/3 在阶段 D 完成之前不算验收。** 本阶段的结论只说明本库的客户端与
+  服务端在 neton.quic 上彼此一致，不构成互通证据。
+- 依赖：`:http3` 的 nativeMain 依赖 `com.netonstream:quic`（其驱动只有 native 实现）；commonMain（协议核心与连接层）仍只依赖 `:http`，不含
+  QUIC。`com.netonstream:quic-testkit` 只进 nativeTest，生产源集不依赖它。
+- 适配（`nativeMain/.../quic/NetonQuic.kt`，h3-quinn `lib.rs`）：`QuicConnection`（`neton.quic.Connection.asH3()`）、`QuicSendStream`、
+  `QuicRecvStream`、`QuicBidiStream`，逐调用对应 h3-quinn：
+  - `acceptUni` / `acceptBi` / `openUni` / `openBi` 直接转调；`opener()` 返回自身（h3-quinn 克隆连接句柄，这里的句柄无状态）；`close(code,
+    reason)` → `Connection.close(VarInt(code), reason)`（类型 0x1d 的 CONNECTION_CLOSE）。
+  - `write` → `writeChunk`（不复制，流控 / 拥塞阻塞时挂起，即背压）；空数据不触碰流（同 h3-quinn 的 `poll_ready` 循环）。`finish` →
+    `finish`，已结束或已复位 → `Unknown`（h3-quinn 把 `finish` 的错误一律映射为 Unknown）。⚖️ 连接已关闭时 `finish` 报 `ConnectionLost`
+    （neton.quic 的 `finish` 不查连接状态，这样 HTTP/3 拿到的是连接错误而非 Unknown）。`reset` / `stopSending` 忽略 ClosedStream（同
+    h3-quinn 的 `let _ =` / `.ok()`）。`stopped` → `stopped()`（`StoppedError.ConnectionLost` → ConnectionLost）。`read` →
+    `readChunk(Int.MAX_VALUE, ordered = true)` 的字节（同 h3-quinn 的 `read_chunk(usize::MAX, true)`）。
+  - 错误映射同 h3-quinn：`ConnectionError.ApplicationClosed` → `ApplicationClose(code)`，`TimedOut` → `Timeout`，其余（Transport、
+    ConnectionClosed、Reset、LocallyClosed、VersionMismatch、CidsExhausted）→ `Undefined`；`WriteError.Stopped` / `ReadError.Reset` →
+    `StreamTerminated(code)`；`*.ConnectionLost` → `ConnectionLost`（其连接错误同上映射）；ClosedStream、ZeroRttRejected、IllegalOrderedRead →
+    `Unknown`（h3-quinn 对 IllegalOrderedRead panic；本适配只做有序读，不会出现）。
+  - ALPN：HTTP/3 连接是 TLS 协商出 "h3" 的 QUIC 连接（RFC 9114 §3.1）。ALPN 属于 TLS 配置而非 QUIC 配置：应用把 `ALPN_H3` 设到交给
+    `ServerConfig` / `ClientConfig` 的加密配置上（同 h3 示例在给 quinn 的 rustls 配置上设 `alpn_protocols = [b"h3"]`），双方无共同协议时握手以
+    no_application_protocol 失败。真实 TLS 到位后即如此设置；目前只有测试替身支持：`MockServerCrypto(alpn = listOf(ALPN_H3))` /
+    `MockClientCrypto(alpn = ...)`，测试在握手后核对双方协商出的协议为 "h3"。适配本身不检查 ALPN（同 h3-quinn）。
+- 测试的参数化（同 `:http` 用 `testStreamPair` 在内存流与 TCP 上跑 h1 / h2 的做法）：阶段 B 的 `ConnectionTest`（19）、`RequestTest`（38）、
+  `ConnectionLayerTest`（39）改为抽象类，经 `QuicPairFactory` 取得一对连接，各有两个子类：`…Memory`（内存替身，第 2 层）与 `…Quic`（两个
+  neton.quic 端点、回环 UDP、测试替身握手、ALPN h3，第 3 层）。阶段 B 的全部 96 个连接层场景因此也在真实 QUIC 上运行，包括关键流（控制 /
+  编码器 / 解码器流结束或复位、本端控制流被 STOP_SENDING——以原始对端在 neton.quic 上触发）、QPACK 流校验、431、取消隔离、阻塞的请求流
+  不阻塞其他流、GOAWAY 的 `>=` 边界、空闲超时（QUIC 的 `maxIdleTimeout` 300 ms）。替身的 `streamCapacity` 在 neton.quic 上是流接收窗口，
+  "由谁以何码关闭" 在 neton.quic 上取 `closeReason()`（对端的关闭异步到达，测试等到其出现）。
+  - 在真实 QUIC 上暴露、原本依赖替身同步投递的测试假设（均为测试问题，已改测试、未改库）：
+    - `request_sequence_check`（10 个非法帧序列）：客户端读到连接错误后立即关闭唯一的 `SendRequest`，此时客户端驱动尚未被恢复、还没看到对端的
+      CONNECTION_CLOSE，于是先记下本端的 H3_NO_ERROR（连接错误先到者为准），驱动返回 Local 而非对端的码。改为：读失败时不先关闭，等驱动结束
+      后再关闭。
+    - 解码器流 / 控制流复位即关键流关闭：写入流类型后立刻 RESET_STREAM，在 QUIC 上复位会放弃尚未发出的数据，对端收到的是一条类型未到即被复位的
+      流，按 RFC 9114 §6.2 忽略，连接直到空闲超时才结束。改为：等服务端收到客户端的 SETTINGS（`peerSettings`；解码器流的类型在其之前写入）后
+      再复位。
+- 端到端测试（`EndToEndTest`，11 个，本库 HTTP/3 客户端对本库 HTTP/3 服务端，全部在 neton.quic 上）：简单 GET（版本为 HTTP/3，客户端关闭
+  唯一的发送者 → 服务端看到 H3_NO_ERROR）；POST 双向流式消息体（64 × 16 KiB，每块回显后才发下一块，响应头部先于请求体结束到达）；双向
+  trailer；一条连接上 300 个并发请求（QUIC 默认并发双向流上限 100 的三倍，第 101 个等对端的 MAX_STREAMS；服务端同时进行中的请求峰值恰为
+  100）；各 8 MiB 的上传与下载，流接收窗口 64 KiB：读方不读时写方被流控挡住（上传与下载都停在 32 KiB，即不超过一个窗口），读方开始读后逐字节
+  核对；三个流式请求中客户端取消一个（`stopStream` + `stopSending`，服务端读报 RemoteTerminate(H3_REQUEST_CANCELLED)、写被叫停），另两个与连接
+  不受影响、其后新请求照常；GOAWAY 优雅关闭（请求 0、4、8 进行中时 `shutdown(0)`，GOAWAY 为 12，恰在边界上的流 12 被 H3_REQUEST_REJECTED
+  拒绝，其后新请求报 RemoteClosing，进行中的三个正常完成，`accept()` 返回 null，服务端关闭 → 客户端 Remote(H3_NO_ERROR)）；HTTP/3 层关闭的
+  传播（等待响应时服务端 `close()`：客户端流报 Connection(Remote(H3_NO_ERROR))，驱动同，新请求失败）；QUIC 层关闭的传播（关闭整个服务端
+  端点，码 H3_INTERNAL_ERROR：客户端 Remote(ApplicationClose)，服务端自身为 Undefined(LocallyClosed)）；150 个字段的请求 → 431，同一连接上
+  下一个请求照常；ALPN 不一致（客户端只提供 h2）→ 双方握手失败。
+- 结果：
+  - macOS（`./gradlew :http3:macosArm64Test`）369 个全部通过（阶段 B 的 262 + 在 neton.quic 上再跑的 96 + 端到端 11），强制重跑共 4 次均通过；
+    `:http` 1,197 个（14 个忽略）、0 失败（本阶段未改 `:http`）。
+  - Linux x64（153，Rocky 9，`./gradlew :http3:linuxX64Test --rerun-tasks`）：`NETON_IO_DRIVER=epoll` 与 `iouring` 各 3 次，每次 369 个全部通过。
+  - 在 153 上最慢的是 `ConnectionLayerTestQuic.oversizedResponseHeadersFrameFailsOnClient`（epoll 17 s，io_uring 9–11 s；macOS 3–7 s），原因
+    见下方 quic 的第 1 条；其余第 3 层测试都在 2 s 内（大消息体测试的 2 s 主要是判定"已停住"的等待）。
+- http3 本身：在真实 QUIC 上没有发现需要修改协议核心或连接层的问题；上面两处都是测试对替身同步投递的假设。记录一个行为（未改，同参考的
+  先到者为准）：对端的 CONNECTION_CLOSE 已到 QUIC 层、而 HTTP/3 驱动尚未观察到时，本端关闭（如最后一个 `SendRequest.close()`）记下的是本端
+  的 H3_NO_ERROR。
+- 记给 quic（未改 quic 仓库）：
+  1. **写流不让出反应器**：`SendStream.write*` 在有流 / 连接信用时从不挂起，连接驱动（发包）与端点的收包循环在同一个单线程反应器上，因此一个
+     连续写小块的协程在信用耗尽之前，既不会让任何数据发出，也不会处理任何收到的包（STOP_SENDING、ACK 等）。复现：上述测试中服务端以 4 字节的
+     DATA 帧循环 `sendData`，客户端在收到响应头部后立即 STOP_SENDING；服务端在写满整个流窗口后才发现被叫停——208,316 次写、每次 6 字节，
+     共 1,249,896 字节，恰好是默认流接收窗口 1,250,000 以内（macOS 上约 2.9 s）。期望：写方在让出前的工作量有界（如 tokio 的 coop 预算），
+     响应头部应在第一次让出前发出、STOP_SENDING 在几毫秒内生效。quinn 在 tokio 多线程运行时上驱动在其他工作线程，不显现；current_thread 上
+     情形相同。影响有界（至多一个流窗口），HTTP/3 未绕开，待 quic 决定。
+  2. 在 153 上按所给命令发布时 `:quic:publishKotlinMultiplatformPublicationToMavenLocal` 失败（其元数据编译需要 `io-iosarm64`，Linux 上没有）；
+     本次在 153 上发布 `quic` / `quic-testkit` 的 linuxX64 产物，根模块（`quic`、`quic-testkit` 的 .module 与元数据 jar）从 macOS 的 mavenLocal
+     复制（同一 quic 提交 164e922）。
+  3. 已在 HTTP/3 下验证的 neton.quic 行为：MAX_STREAMS 限流与续发、流接收窗口的背压、RESET_STREAM / STOP_SENDING 的码、应用关闭码与空闲超时
+     的传播、ALPN 协商（替身）。
+- 示例 / 压测：**未给 `http-bench` 加 HTTP/3 hello 服务端与客户端。** 它们只能用 quic-testkit 的 TLS 替身握手，除了彼此之外连不上任何 HTTP/3
+  实现（curl `--http3`、h2load 等都连不上），与 `http-bench` 中其他可对外对照的可执行文件性质不同，且会让一个可执行文件依赖测试专用产物；
+  真实 TLS 到位后再加。性能未测。
+- 未决 / 后续：阶段 D（真实 TLS、与外部 HTTP/3 实现双向互通、h3spec，§6 中 h3spec 五项不继承跳过）；上面 quic 的第 1 条；替身与 neton.quic
+  都未覆盖丢包与乱序下的 HTTP/3 行为（回环不丢包）；其余同阶段 B 的未决项。
