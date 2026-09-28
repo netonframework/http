@@ -282,11 +282,15 @@ internal class Send(config: StreamsConfig) {
     val hasPendingSend: Boolean get() = prioritize.hasPendingSend
 
     companion object {
+        // Looked up as names, not strings: a string key is hashed and compared case-insensitively on every response.
+        private val KEEP_ALIVE = HeaderName.fromStatic("keep-alive")
+        private val PROXY_CONNECTION = HeaderName.fromStatic("proxy-connection")
+
         /** RFC 9113 §8.2.2 connection-specific fields are refused (`check_headers`). */
         fun checkHeaders(fields: HeaderMap<HeaderValue>): UserError? {
             if (fields.containsKey(HeaderName.CONNECTION) || fields.containsKey(HeaderName.TRANSFER_ENCODING) ||
-                fields.containsKey(HeaderName.UPGRADE) || fields.containsKey("keep-alive") ||
-                fields.containsKey("proxy-connection")
+                fields.containsKey(HeaderName.UPGRADE) || fields.containsKey(KEEP_ALIVE) ||
+                fields.containsKey(PROXY_CONNECTION)
             ) {
                 return UserError.MalformedHeaders
             }

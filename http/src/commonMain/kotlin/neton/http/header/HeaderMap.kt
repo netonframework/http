@@ -599,8 +599,10 @@ class HeaderMap<T>() {
         return h.toInt() and HASH_MASK
     }
 
-    private fun matches(stored: HeaderName, name: HeaderName?, str: String?): Boolean =
-        if (name != null) stored == name else stored.equalsIgnoreCase(str!!)
+    // Identity first: standard names are single instances, so a hit costs no virtual `equals` call.
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun matches(stored: HeaderName, name: HeaderName?, str: String?): Boolean =
+        if (name != null) stored === name || stored == name else stored.equalsIgnoreCase(str!!)
 
     // ===== internals: probing =====
 
