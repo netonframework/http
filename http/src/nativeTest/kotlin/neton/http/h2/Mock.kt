@@ -61,7 +61,10 @@ class MockIo(private val inner: IoStream, private val shared: MockShared) : IoSt
 
     override suspend fun read(dst: Buffer): Int {
         if (shared.unexpectedEof) throw UnexpectedEofException("Simulate an unexpected eof error")
-        return inner.read(dst)
+        val n = inner.read(dst)
+        // The reference's mock checks the flag on every poll, including the one after a parked read is woken.
+        if (n < 0 && shared.unexpectedEof) throw UnexpectedEofException("Simulate an unexpected eof error")
+        return n
     }
 
     override suspend fun write(src: Buffer): Int {
@@ -158,9 +161,9 @@ class Handle(private val io: IoStream, val shared: MockShared) {
         while (true) {
             if (!fw.isEmpty) {
                 val payload = fw.queuedPayload
-                io.write(fw.writeBuffer)
+                put(fw.writeBuffer)
                 if (payload != null && payload.size > 0) {
-                    io.write(Buffer.wrap(payload))
+                    put(Buffer.wrap(payload))
                     fw.advance(payload.size)
                 }
             }
@@ -168,8 +171,20 @@ class Handle(private val io: IoStream, val shared: MockShared) {
         }
     }
 
+    /**
+     * Writes to the library. As in the reference's mock, a write always succeeds: once the library's end is gone the
+     * bytes are dropped.
+     */
+    private suspend fun put(b: Buffer) {
+        try {
+            io.write(b)
+        } catch (e: IoException) {
+            b.skip(b.readableBytes)
+        }
+    }
+
     suspend fun writePreface() {
-        io.write(Buffer().also { it.writeBytes(PREFACE_BYTES) })
+        put(Buffer().also { it.writeBytes(PREFACE_BYTES) })
     }
 
     /** Reads the client preface (`read_preface`). */
@@ -195,7 +210,7 @@ class Handle(private val io: IoStream, val shared: MockShared) {
 
     /** Writes raw bytes (`send_bytes`). */
     suspend fun sendBytes(data: ByteArray) {
-        io.write(Buffer().also { it.writeBytes(data) })
+        put(Buffer().also { it.writeBytes(data) })
     }
 
     /** Performs the handshake as the server of a client under test (`assert_client_handshake`). */
@@ -231,6 +246,9 @@ class Handle(private val io: IoStream, val shared: MockShared) {
         shared.wakeTxRem()
         while (shared.txRem != 0L) suspendCancellableCoroutine { c -> shared.txWaiter = c }
         shared.txRem = Long.MAX_VALUE
+        // The reference's pending write is retried the next time the connection task is woken (by a read, say); a
+        // parked writer here needs the wake-up a writable transport would give it.
+        shared.wakeTxRem()
     }
 
     /** Lifts the write budget (`unbounded_bytes`). */
@@ -262,6 +280,164 @@ fun mockNewWithWriteCapacity(cap: Int): Pair<IoStream, Handle> {
     val p = mockNew()
     p.second.shared.txRem = cap.toLong()
     return p
+}
+
+/**
+ * A scripted transport (tokio-test's `io::Builder`, with h2-support's `MockH2::handshake`): the library must write
+ * exactly the `write` chunks, in order, and reads the `read` chunks. A read waits until the writes scripted before it
+ * are done; writes may run ahead of reads. Past the script, reads are EOF and writes fail. [assertDone] checks the
+ * whole script was used (tokio-test's `Drop` check).
+ */
+class MockIoBuilder {
+    private val actions = ArrayList<ScriptedIo.Action>()
+
+    fun read(b: ByteArray) = apply { actions.add(ScriptedIo.Action(ScriptedIo.READ, b)) }
+
+    fun write(b: ByteArray) = apply { actions.add(ScriptedIo.Action(ScriptedIo.WRITE, b)) }
+
+    /** `wait(duration)`: reads and writes past this point wait [ms] once it is reached. */
+    fun wait(ms: Long) = apply { actions.add(ScriptedIo.Action(ScriptedIo.WAIT, ByteArray(0), ms)) }
+
+    /** `handshake`: the client preface and SETTINGS written; the server's SETTINGS and ACK read. */
+    fun handshake() = handshakeReadSettings(Frames.SETTINGS)
+
+    fun handshakeReadSettings(settings: ByteArray) =
+        write(PREFACE_BYTES).write(Frames.SETTINGS).read(settings).read(Frames.SETTINGS_ACK)
+
+    fun build(): ScriptedIo = ScriptedIo(actions)
+}
+
+class ScriptedIo(private val actions: MutableList<Action>) : IoStream {
+    class Action(val kind: Int, val data: ByteArray, val waitMs: Long = 0) {
+        var pos = 0
+        var waited = false
+        val done: Boolean get() = if (kind == WAIT) waited else pos == data.size
+    }
+
+    private var waiters = ArrayList<kotlinx.coroutines.CancellableContinuation<Unit>>()
+    private var consumed = 0
+
+    /** The first mismatch, reported again by [assertDone]. */
+    var failure: Throwable? = null
+        private set
+
+    override val capabilities: Set<StreamCapability> get() = setOf(StreamCapability.HalfClose)
+
+    private fun front(): Action? {
+        while (actions.isNotEmpty() && actions[0].done) {
+            actions.removeAt(0)
+            consumed++
+            wake()
+        }
+        return actions.firstOrNull()
+    }
+
+    /** A wait at the front of the script elapses. */
+    private suspend fun settleWait(a: Action) {
+        delay(a.waitMs)
+        a.waited = true
+    }
+
+    override suspend fun read(dst: Buffer): Int {
+        while (true) {
+            val a = front() ?: return -1
+            when (a.kind) {
+                READ -> {
+                    val n = a.data.size - a.pos
+                    dst.writeBytes(a.data, a.pos, n)
+                    a.pos += n
+                    front()
+                    return n
+                }
+                WAIT -> settleWait(a)
+                else -> park()
+            }
+        }
+    }
+
+    override suspend fun write(src: Buffer): Int {
+        val total = src.readableBytes
+        while (true) {
+            val f = front() ?: throw IoException("broken pipe: write past the script")
+            if (f.kind == WAIT) {
+                settleWait(f)
+                continue
+            }
+            var blockedByWait = false
+            for (a in actions) {
+                if (src.readableBytes == 0) break
+                if (a.kind == WAIT) {
+                    blockedByWait = true
+                    break
+                }
+                if (a.kind == READ || a.done) continue
+                val n = minOf(src.readableBytes, a.data.size - a.pos)
+                for (i in 0 until n) {
+                    if (src.getByte(i) != a.data[a.pos + i]) {
+                        val e = AssertionError(
+                            "write buffer mismatch: expected ${a.data.drop(a.pos).take(n).map { it.toInt() and 0xff }}, " +
+                                "got ${src.peekAll().take(n).map { it.toInt() and 0xff }}",
+                        )
+                        failure = failure ?: e
+                        throw e
+                    }
+                }
+                a.pos += n
+                src.skip(n)
+            }
+            front()
+            if (src.readableBytes == 0) return total
+            if (!blockedByWait) {
+                val e = AssertionError("unexpected write of ${src.readableBytes} bytes: ${src.peekAll().map { it.toInt() and 0xff }}")
+                failure = failure ?: e
+                throw e
+            }
+            // The rest goes after a wait further down the script: wait for the reads before it.
+            park()
+        }
+    }
+
+    override suspend fun flush() {}
+
+    override suspend fun shutdownOutput() {}
+
+    override fun close() {}
+
+    private suspend fun park() {
+        suspendCancellableCoroutine { c -> waiters.add(c) }
+    }
+
+    private fun wake() {
+        if (waiters.isEmpty()) return
+        val w = waiters
+        waiters = ArrayList()
+        for (c in w) if (c.isActive) c.resume(Unit)
+    }
+
+    /**
+     * Waits until [count] scripted actions were consumed (for the reference's tests that poll the connection by hand
+     * until it is idle before going on).
+     */
+    suspend fun awaitConsumed(count: Int) {
+        while (consumed < count) {
+            front()
+            if (consumed >= count) break
+            park()
+        }
+    }
+
+    /** Every scripted read and write happened (tokio-test's `Drop` check). */
+    fun assertDone() {
+        failure?.let { throw it }
+        val left = actions.filter { !it.done }
+        assertTrue(left.isEmpty(), "There is still data left to ${if (left.firstOrNull()?.kind == READ) "read" else "write"}")
+    }
+
+    companion object {
+        const val READ = 0
+        const val WRITE = 1
+        const val WAIT = 2
+    }
 }
 
 /** `idle_ms`. */
@@ -301,9 +477,18 @@ fun headerMapOf(vararg pairs: Pair<String, String>): HeaderMap<HeaderValue> {
     return m
 }
 
-/** Runs a mock test on a reactor with a timeout, so a hang fails instead of blocking the suite. */
+/**
+ * Runs a mock test on a reactor with a timeout, so a hang fails instead of blocking the suite. Coroutines the test
+ * launched and left running (a connection nobody waits for) are cancelled once [block] returns, as the reference's
+ * runtime drops its spawned tasks at the end of a test.
+ */
 fun h2Test(timeoutMs: Long = 20_000, block: suspend CoroutineScope.() -> Unit) = runReactor {
-    withTimeout(timeoutMs) { block() }
+    withTimeout(timeoutMs) {
+        kotlinx.coroutines.coroutineScope {
+            block()
+            coroutineContext[kotlinx.coroutines.Job]!!.children.forEach { it.cancel() }
+        }
+    }
 }
 
 /** `poll_err!`: the next read fails. */
