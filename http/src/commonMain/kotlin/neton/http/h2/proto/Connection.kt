@@ -275,6 +275,7 @@ internal class Connection(
                     fatal?.let { return it }
                     // The client closes once no stream and no handle is left (`maybe_close_connection_if_no_streams`).
                     if (peer == Peer.Client && !streams.hasStreamsOrOtherReferences()) goAwayNow(Reason.NO_ERROR)
+                    val hadStreamsOrRefs = peer == Peer.Client && streams.hasStreamsOrOtherReferences()
 
                     streams.clearExpiredResetStreams()
                     when (bufferControl()) {
@@ -297,6 +298,10 @@ internal class Connection(
                         goAwayNow(Reason.NO_ERROR)
                         continue
                     }
+                    // The last stream was released during this round (its last frame written, `pop_frame`): look
+                    // again, so a client with no handle left closes (client `Future for Connection`: "last stream
+                    // closed during poll, wake again").
+                    if (hadStreamsOrRefs && !streams.hasStreamsOrOtherReferences()) continue
                     if (state == STATE_OPEN && fatal == null) parkDriver()
                 }
                 STATE_CLOSING -> {

@@ -1195,13 +1195,17 @@ class StreamStatesTest {
             srv.sendFrame(Frames.reset(1).cancel())
             // ⚖️ adapted: in the reference the connection is not polled between the client queueing its trailers and
             // the RST_STREAM arriving, so the trailers are dropped by the reset. Here the connection runs by itself
-            // and has usually written them already: accept them before the pong. (The reset of a stream with queued
-            // frames is covered by rstWithBufferedData and the state tests.)
+            // and has usually written them already: accept them. They end the stream, which is released once they are
+            // written; with no handle left the client then goes away at once, as the reference's connection does when
+            // its last stream is released during a poll ("wake again"), before it reads the PING: GOAWAY, no pong.
+            // (The reset of a stream with queued frames is covered by rstWithBufferedData and the state tests.)
             srv.sendFrame(Frames.ping(ByteArray(8) { 1 }))
-            var f = srv.next()
+            val f = srv.next()
             if (f is Headers) {
                 assertFrameEq(f, Frames.headers(1).eos())
-                f = srv.next()
+                assertFrameEq(srv.next() ?: fail("unexpected EOF"), Frames.goAway(0).noError())
+                srv.close()
+                return@launch
             }
             assertFrameEq(f ?: fail("unexpected EOF"), Frames.ping(ByteArray(8) { 1 }).pong())
             srv.recvFrame(Frames.goAway(0).noError())
