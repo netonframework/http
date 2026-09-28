@@ -264,6 +264,31 @@ class ServerTest {
         withTimeout(5_000) { done.await() }
     }
 
+    @Test
+    fun upgradeAfterSuspendingServiceHandsOverEveryByte() = runReactor {
+        val (server, client) = memoryStreamPair()
+        val cfg = Http1ServerConfig(headerReadTimeoutMillis = 0, keepAliveIdleTimeoutMillis = 0, autoDateHeader = false, upgrades = true)
+        val received = CompletableDeferred<String>()
+        val done = async {
+            cfg.serveConnection(server) { req ->
+                launch {
+                    val up = neton.http.upgradeOn(req.extensions)
+                    val acc = Buffer()
+                    while (acc.readableBytes < 10) if (up.read(acc) < 0) break
+                    received.complete(acc.readAll().decodeToString())
+                    up.close()
+                }
+                delay(20)                                          // the service suspends before answering
+                Response.builder().status(101).header("upgrade", "x").header("connection", "upgrade").body(EmptyBody as Body)
+            }.serve()
+        }
+        client.send("GET / HTTP/1.1\r\nupgrade: x\r\nconnection: upgrade\r\n\r\n")
+        client.readUntil("\r\n\r\n")
+        client.send("0123456789")
+        assertEquals("0123456789", withTimeout(5_000) { received.await() })
+        withTimeout(5_000) { done.await() }
+    }
+
     @Suppress("unused")
     private val sizeHintUnused = SizeHint.DEFAULT
 }

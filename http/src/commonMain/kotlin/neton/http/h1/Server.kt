@@ -288,6 +288,9 @@ class Http1Connection internal constructor(private val stream: IoStream, private
     private fun maybeStartWatch() {
         if (!inFlight || watch != null || conn.allowHalfClose || io.readEof || io.readBuf.readableBytes > 0) return
         if (conn.reading != H1Conn.Reading.KEEP_ALIVE) return
+        // ⚖️ Not for a request asking for an upgrade: a read parked when the connection is handed over would race the
+        // new owner (hyper polls, so it has no parked read). Such a client closing is noticed when the response is written.
+        if (conn.headWantsUpgrade) return
         watch = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
                 if (io.readFromIo() == 0 && inFlight) {
