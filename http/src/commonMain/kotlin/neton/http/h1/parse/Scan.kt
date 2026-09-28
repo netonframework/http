@@ -137,10 +137,30 @@ internal fun scanHeaderValue(buf: ByteArray, pos: Int, end: Int): Int {
 
 /**
  * `swar.rs match_header_name_vectored`: advances from [pos] over tchar bytes, returning the index of the first
- * non-tchar byte in `[pos, end)` (or [end]). The reference's SWAR backend matches names byte by byte too.
+ * non-tchar byte in `[pos, end)` (or [end]). The reference's SWAR backend matches names byte by byte (tchar is not a
+ * range); here eight bytes are loaded at once and tested in the register, unrolled: a byte loop on K/N costs a
+ * safepoint poll and a bounds check per byte. Same result.
  */
 internal fun scanHeaderName(buf: ByteArray, pos: Int, end: Int): Int {
     var p = pos
+    while (end - p >= BLOCK_SIZE) {
+        val n = matchHeaderNameChar8(loadWord(buf, p))
+        p += n
+        if (n != BLOCK_SIZE) return p
+    }
     while (p < end && isHeaderNameToken(buf[p].toInt() and 0xFF)) p++
     return p
+}
+
+/** Number of leading bytes of [x] (8 bytes, little-endian) that are tchars; [BLOCK_SIZE] if all are. */
+internal fun matchHeaderNameChar8(x: Long): Int {
+    if (!isHeaderNameToken((x and 0xFF).toInt())) return 0
+    if (!isHeaderNameToken(((x ushr 8) and 0xFF).toInt())) return 1
+    if (!isHeaderNameToken(((x ushr 16) and 0xFF).toInt())) return 2
+    if (!isHeaderNameToken(((x ushr 24) and 0xFF).toInt())) return 3
+    if (!isHeaderNameToken(((x ushr 32) and 0xFF).toInt())) return 4
+    if (!isHeaderNameToken(((x ushr 40) and 0xFF).toInt())) return 5
+    if (!isHeaderNameToken(((x ushr 48) and 0xFF).toInt())) return 6
+    if (!isHeaderNameToken((x ushr 56).toInt())) return 7
+    return BLOCK_SIZE
 }
