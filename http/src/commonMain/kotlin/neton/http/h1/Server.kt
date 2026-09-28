@@ -25,6 +25,7 @@ import neton.io.core.ClosedException
 import neton.io.core.IoException
 import neton.io.core.IoStream
 import neton.io.core.StreamCapability
+import neton.io.core.closeGracefully
 import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
 
 /** A request handler (hyper `service::HttpService`): one response per request. */
@@ -309,11 +310,24 @@ class Http1Connection internal constructor(private val stream: IoStream, private
         }
     }
 
+    /**
+     * After an automatic error response (400 / 413 / 414 / 431): shut the write side (hyper does this before returning
+     * the error), then ⚖️ drain what the client still sends until it closes, for at most [LINGER_MILLIS]. Closing with
+     * unread input makes the kernel send a reset, which can destroy the response before the client reads it (seen with
+     * io_uring on hyper's `max_buf_size` test). Streams without half-close or read timeouts are simply closed.
+     */
+    private suspend fun lingerClose() {
+        val caps = stream.capabilities
+        if (StreamCapability.HalfClose in caps && StreamCapability.ReadTimeout in caps) stream.closeGracefully(LINGER_MILLIS)
+        else runCatching { if (StreamCapability.HalfClose in caps) stream.shutdownOutput() }
+    }
+
     /** The end of the connection (hyper `poll_inner` when done): an upgrade, or flush and shut the write side. */
     private suspend fun finish(): Boolean {
         val pending = pendingUpgrade
         conn.error?.let { e ->
             runCatching { flushLocked() }
+            lingerClose()
             throw e
         }
         if (pending != null) {
@@ -336,5 +350,9 @@ class Http1Connection internal constructor(private val stream: IoStream, private
             throw HttpError(HttpError.Kind.Shutdown, e)
         }
         return false
+    }
+
+    private companion object {
+        const val LINGER_MILLIS = 1_000L
     }
 }
