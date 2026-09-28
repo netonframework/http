@@ -84,10 +84,14 @@ class FramedWrite(vectoredIo: Boolean = true) {
     /**
      * Whether a frame can be buffered without writing first (`has_capacity`): nothing is queued and the buffer has
      * room for a frame header plus the chain threshold.
+     *
+     * ⚖️ An empty buffer always has room: a [Buffer] drained through zero-copy slices (or a pooled one gone idle)
+     * holds no array until its next write, so its capacity reads 0 although writing will allocate. (A `BytesMut` keeps
+     * its capacity.)
      */
     fun hasCapacity(): Boolean =
         nextData == null && nextContinuation == null &&
-            writeBuffer.capacity - writeBuffer.writerIndex() >= minBufferCapacity
+            (writeBuffer.readableBytes == 0 || writeBuffer.capacity - writeBuffer.writerIndex() >= minBufferCapacity)
 
     /**
      * Encodes [frame] (`buffer`). Returns null, or [UserError.PayloadTooBig] for a DATA payload larger than the max

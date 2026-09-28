@@ -22,6 +22,12 @@ enum class IoErrorKind(val description: String) {
 
     /** Any other I/O error (`Other`). */
     Other("other error"),
+
+    /** The connection or stream ended under an operation (`BrokenPipe`). */
+    BrokenPipe("broken pipe"),
+
+    /** The transport ended in the middle of something (`UnexpectedEof`). */
+    UnexpectedEof("unexpected end of file"),
 }
 
 /**
