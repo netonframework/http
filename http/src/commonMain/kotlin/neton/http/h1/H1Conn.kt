@@ -492,14 +492,13 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
      * is pending; [onPending] is told then too. [frames] runs the body's `nextFrame` calls.
      */
     suspend fun pumpBody(body: neton.http.Body, frames: InlineCall<neton.http.Body, Frame?>, onPending: () -> Unit) {
+        // Rare paths (buffer full, body not ready, trailers) are calls, not inlined: K/N zeroes this function's whole
+        // frame on entry and on every resume, so their temporaries would cost every response (2.4 KB frame, ~130
+        // instructions of memset per request before).
         while (canWriteBody) {
-            if (!io.canBuffer) flushLocked()
+            if (!io.canBuffer) flushBuffered()
             val r = try { frames.start(body) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Throwable) { throw HttpError(HttpError.Kind.UserBody, e) }
-            val frame = if (r !== kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED) r as Frame? else {
-                flushLocked()
-                onPending()
-                try { frames.await() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Throwable) { throw HttpError(HttpError.Kind.UserBody, e) }
-            }
+            val frame = if (r !== kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED) r as Frame? else awaitFrame(frames, onPending)
             if (frame == null) {
                 io.writeLock.withLock { endBody() }
                 break
@@ -513,14 +512,27 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
                 if (data.size == 0) continue
                 io.writeLock.withLock { writeBody(data) }
             } else if (frame is Frame.Trailers) {
-                io.writeLock.withLock {
-                    writeTrailers(frame.headers)
-                    if (canWriteBody) endBody()
-                }
+                writeTrailersAndEnd(frame.headers)
                 break
             }
         }
         flushLocked()
+    }
+
+    private suspend fun flushBuffered() = flushLocked()
+
+    /** A frame that was not ready at once: what is buffered goes out first (hyper flushes when the body is pending). */
+    private suspend fun awaitFrame(frames: InlineCall<neton.http.Body, Frame?>, onPending: () -> Unit): Frame? {
+        flushLocked()
+        onPending()
+        return try { frames.await() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Throwable) { throw HttpError(HttpError.Kind.UserBody, e) }
+    }
+
+    private suspend fun writeTrailersAndEnd(trailers: neton.http.header.HeaderMap<HeaderValue>) {
+        io.writeLock.withLock {
+            writeTrailers(trailers)
+            if (canWriteBody) endBody()
+        }
     }
 
     /** [flush] holding the write lock; inline, so no suspending layer of its own on the per-response path. */
