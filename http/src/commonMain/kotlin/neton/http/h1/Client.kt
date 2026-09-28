@@ -86,7 +86,7 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
     private val io = H1Io(stream, config.maxBufSize)
     private val conn = H1Conn(io, isServer = false, config.h1Config())
 
-    private val frameCall = InlineCall<Body, Frame?> { nextFrame() }
+    private val frameCall = InlineCall<Body, Frame?>(Body::nextFrame)
     private val noop: () -> Unit = {}
 
     private class Pending(val request: Request<out Body>, val response: CompletableDeferred<Response<Incoming>>)

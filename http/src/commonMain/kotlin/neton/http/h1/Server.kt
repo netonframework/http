@@ -94,8 +94,8 @@ class Http1Connection internal constructor(private val stream: IoStream, private
 
     private lateinit var scope: CoroutineScope
     private lateinit var exchangeJob: CompletableJob
-    private val serviceCall = InlineCall<ServiceCall, Response<out Body>> { invoke() }
-    private val frameCall = InlineCall<Body, Frame?> { nextFrame() }
+    private val serviceCall = InlineCall<ServiceCall, Response<out Body>>(ServiceCall::invoke)
+    private val frameCall = InlineCall<Body, Frame?>(Body::nextFrame)
     private val call = ServiceCall(service)
 
     private var inFlight = false
