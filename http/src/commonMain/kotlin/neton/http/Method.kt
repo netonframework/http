@@ -104,20 +104,26 @@ class Method private constructor(private val kind: Int, private val name: String
 
         /** As [fromBytes], but returns null instead of throwing [InvalidMethod]. */
         fun tryFromBytes(src: ByteArray, offset: Int = 0, length: Int = src.size - offset): Method? {
-            if (offset < 0 || length < 0 || offset > src.size - length) {
-                throw IndexOutOfBoundsException("offset=$offset length=$length size=${src.size}")
-            }
+            neton.http.header.checkRange(src.size, offset, length)
+            // The four common methods by direct byte compares (hyper's `Method::from_bytes` matches on length, then bytes).
             val standard = when (length) {
                 0 -> return null
-                3 -> when {
-                    matches(src, offset, "GET") -> GET
-                    matches(src, offset, "PUT") -> PUT
-                    else -> null
+                3 -> {
+                    val b0 = src[offset].toInt()
+                    val b1 = src[offset + 1].toInt()
+                    val b2 = src[offset + 2].toInt()
+                    if (b1 == 'E'.code && b2 == 'T'.code && b0 == 'G'.code) GET
+                    else if (b1 == 'U'.code && b2 == 'T'.code && b0 == 'P'.code) PUT
+                    else null
                 }
-                4 -> when {
-                    matches(src, offset, "POST") -> POST
-                    matches(src, offset, "HEAD") -> HEAD
-                    else -> null
+                4 -> {
+                    val b0 = src[offset].toInt()
+                    val b1 = src[offset + 1].toInt()
+                    val b2 = src[offset + 2].toInt()
+                    val b3 = src[offset + 3].toInt()
+                    if (b0 == 'P'.code && b1 == 'O'.code && b2 == 'S'.code && b3 == 'T'.code) POST
+                    else if (b0 == 'H'.code && b1 == 'E'.code && b2 == 'A'.code && b3 == 'D'.code) HEAD
+                    else null
                 }
                 5 -> when {
                     matches(src, offset, "PATCH") -> PATCH
