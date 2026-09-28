@@ -580,20 +580,23 @@ class HeaderMap<T>() {
     // ===== internals: hashing =====
 
     /** Hash of a key in the current danger state; exactly one of [name] and [str] is non-null. */
-    private fun hashKey(name: HeaderName?, str: String?): Int {
-        if (danger == DANGER_RED) {
-            val k0 = sipK0
-            val k1 = sipK1
-            val h = if (name != null) {
-                val b = name.bytes
-                sipHash13(k0, k1, b.size) { b[it].toInt() and 0xff }
-            } else {
-                val s = str!!
-                sipHash13(k0, k1, s.length) { HEADER_CHARS[charToByte(s[it].code)].toInt() }
-            }
-            return h.toInt() and HASH_MASK
+    // Inline: while the map is not Red the hash is the name's own. SipHash (Red) is out of line, so its code does not
+    // weigh on every insert and lookup (K/N sets up a frame per call).
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun hashKey(name: HeaderName?, str: String?): Int =
+        if (danger != DANGER_RED) (name?.hash ?: HeaderName.hashOf(str!!)) and HASH_MASK else redHash(name, str)
+
+    private fun redHash(name: HeaderName?, str: String?): Int {
+        val k0 = sipK0
+        val k1 = sipK1
+        val h = if (name != null) {
+            val b = name.bytes
+            sipHash13(k0, k1, b.size) { b[it].toInt() and 0xff }
+        } else {
+            val s = str!!
+            sipHash13(k0, k1, s.length) { HEADER_CHARS[charToByte(s[it].code)].toInt() }
         }
-        return (name?.hash ?: HeaderName.hashOf(str!!)) and HASH_MASK
+        return h.toInt() and HASH_MASK
     }
 
     private fun matches(stored: HeaderName, name: HeaderName?, str: String?): Boolean =
@@ -805,7 +808,8 @@ class HeaderMap<T>() {
         modCount++
     }
 
-    private fun pushEntry(hash: Int, key: HeaderName, value: T) {
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun pushEntry(hash: Int, key: HeaderName, value: T) {
         if (entryCount == keys.size) resizeEntries(maxOf(capacity(), entryCount * 2, 8))
         val i = entryCount++
         keys[i] = key
@@ -945,7 +949,11 @@ class HeaderMap<T>() {
     // ===== internals: growth and the danger state machine =====
 
     /** `try_reserve_one`: makes room for one more name, or runs the Yellow transition. False on [MaxSizeReached]. */
-    private fun tryReserveOne(): Boolean {
+    /** Room for one more name (`try_reserve_one`); the common case (not Yellow, not full) is an inline check. */
+    @Suppress("NOTHING_TO_INLINE")
+    private inline fun tryReserveOne(): Boolean = (danger != DANGER_YELLOW && entryCount < capacity()) || reserveOneSlow()
+
+    private fun reserveOneSlow(): Boolean {
         val len = entryCount
         if (danger == DANGER_YELLOW) {
             if (len * LOAD_FACTOR_THRESHOLD >= indices.size) {
