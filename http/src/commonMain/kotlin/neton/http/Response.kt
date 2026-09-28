@@ -19,8 +19,12 @@ class Response<T>(val parts: ResponseParts, var body: T) {
     /** `200 OK`, HTTP/1.1, no headers (`Response::new`). */
     constructor(body: T) : this(ResponseParts(), body)
 
-    var status: StatusCode by parts::status
-    var version: Version by parts::version
+    var status: StatusCode
+        get() = parts.status
+        set(value) { parts.status = value }
+    var version: Version
+        get() = parts.version
+        set(value) { parts.version = value }
     val headers: HeaderMap<HeaderValue> get() = parts.headers
     val extensions: Extensions get() = parts.extensions
 

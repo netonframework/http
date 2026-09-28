@@ -21,9 +21,15 @@ class Request<T>(val parts: RequestParts, var body: T) {
     /** A request with default parts: `GET /`, HTTP/1.1, no headers (`Request::new`). */
     constructor(body: T) : this(RequestParts(), body)
 
-    var method: Method by parts::method
-    var uri: Uri by parts::uri
-    var version: Version by parts::version
+    var method: Method
+        get() = parts.method
+        set(value) { parts.method = value }
+    var uri: Uri
+        get() = parts.uri
+        set(value) { parts.uri = value }
+    var version: Version
+        get() = parts.version
+        set(value) { parts.version = value }
     val headers: HeaderMap<HeaderValue> get() = parts.headers
     val extensions: Extensions get() = parts.extensions
 

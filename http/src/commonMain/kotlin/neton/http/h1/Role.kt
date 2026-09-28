@@ -241,6 +241,7 @@ class ServerHeadParser(val config: H1Config = H1Config()) {
         var isCl = false; var isTe = false; var isTeChunked = false
         var wantsUpgrade = method == Method.CONNECT
         val headers = HeaderMap<HeaderValue>()
+        if (slots.count > 0) headers.reserve(slots.count)
         val caseMap = if (config.preserveHeaderCase) HeaderCaseMap() else null
         for (i in 0 until slots.count) {
             if (slots.nameEnd[i] - slots.nameStart[i] >= 1 shl 16) return fail(H1ParseError.TooLarge)      // hyper record_header_indices
@@ -367,6 +368,7 @@ class ClientHeadParser(val config: H1Config = H1Config()) {
             }
             var keepAlive = version == Version.HTTP_11
             val headers = HeaderMap<HeaderValue>()
+            if (headerCount > 0) headers.reserve(headerCount)
             val caseMap = if (config.preserveHeaderCase) HeaderCaseMap() else null
             for (i in 0 until headerCount) {
                 if (slots.nameEnd[i] - slots.nameStart[i] >= 1 shl 16) return fail(H1ParseError.TooLarge)
@@ -540,12 +542,12 @@ object ServerHeadEncoder {
         val status = parts.status
         val reason = parts.extensions.get<ReasonPhrase>()
         if (parts.version == Version.HTTP_11 && status == StatusCode.OK && reason == null) {
-            ascii(dst, "HTTP/1.1 200 OK\r\n")
+            dst.writeBytes(STATUS_LINE_200)
         } else {
-            ascii(dst, if (parts.version == Version.HTTP_10) "HTTP/1.0 " else "HTTP/1.1 ")   // HTTP/2 coerced to HTTP/1.1
+            dst.writeBytes(if (parts.version == Version.HTTP_10) HTTP10_SP else HTTP11_SP)   // HTTP/2 coerced to HTTP/1.1
             ascii(dst, status.asStr()); dst.writeByte(' '.code.toByte())
             if (reason != null) dst.writeBytes(reason.asBytes()) else ascii(dst, status.canonicalReason() ?: "<none>")
-            ascii(dst, "\r\n")
+            dst.writeBytes(CRLF_BYTES)
         }
 
         val caseMap = parts.extensions.get<HeaderCaseMap>()
@@ -565,7 +567,7 @@ object ServerHeadEncoder {
             if (failed) return@forEach
             if (name !== curName) {
                 // A new name: finish a joined line left open by the previous one (handle_is_name_written).
-                if (isNameWritten) ascii(dst, if (mustWriteChunked) ", chunked\r\n" else "\r\n")
+                if (isNameWritten) dst.writeBytes(if (mustWriteChunked) COMMA_CHUNKED_CRLF else CRLF_BYTES)
                 isNameWritten = false
                 curName = name
             }
@@ -577,7 +579,7 @@ object ServerHeadEncoder {
                             // The body knows its length: trust it matches the header (hyper), write the first value only.
                             if (!isNameWritten) {
                                 kind = EncodePlan.LENGTH; length = body
-                                writeName(dst, HeaderName.CONTENT_LENGTH, w); ascii(dst, ": "); writeValue(dst, value)
+                                writeName(dst, HeaderName.CONTENT_LENGTH, w); dst.writeBytes(COLON_SP); writeValue(dst, value)
                                 wroteLen = true; isNameWritten = true
                             }
                             return@forEach
@@ -590,7 +592,7 @@ object ServerHeadEncoder {
                                 return@forEach
                             }
                             kind = EncodePlan.LENGTH; length = len
-                            writeName(dst, HeaderName.CONTENT_LENGTH, w); ascii(dst, ": "); writeValue(dst, value)
+                            writeName(dst, HeaderName.CONTENT_LENGTH, w); dst.writeBytes(COLON_SP); writeValue(dst, value)
                             wroteLen = true; isNameWritten = true; prevConLen = len
                             return@forEach
                         }
@@ -606,56 +608,56 @@ object ServerHeadEncoder {
                     mustWriteChunked = !H1Headers.isChunked(value)     // `chunked` must be last, else it is added
                     if (!isNameWritten) {
                         kind = EncodePlan.CHUNKED; isNameWritten = true
-                        writeName(dst, HeaderName.TRANSFER_ENCODING, w); ascii(dst, ": "); writeValue(dst, value)
-                    } else { ascii(dst, ", "); writeValue(dst, value) }
+                        writeName(dst, HeaderName.TRANSFER_ENCODING, w); dst.writeBytes(COLON_SP); writeValue(dst, value)
+                    } else { dst.writeBytes(COMMA_SP); writeValue(dst, value) }
                     return@forEach
                 }
                 name === HeaderName.CONNECTION -> {
                     if (!isLast && H1Headers.connectionClose(value)) isLast = true
-                    if (!isNameWritten) { isNameWritten = true; writeName(dst, HeaderName.CONNECTION, w); ascii(dst, ": "); writeValue(dst, value) }
-                    else { ascii(dst, ", "); writeValue(dst, value) }
+                    if (!isNameWritten) { isNameWritten = true; writeName(dst, HeaderName.CONNECTION, w); dst.writeBytes(COLON_SP); writeValue(dst, value) }
+                    else { dst.writeBytes(COMMA_SP); writeValue(dst, value) }
                     return@forEach
                 }
                 name === HeaderName.DATE -> wroteDate = true
                 name === HeaderName.TRAILER -> {
                     if (parts.version == Version.HTTP_10 || !canChunked) return@forEach
-                    if (!isNameWritten) { isNameWritten = true; writeName(dst, HeaderName.TRAILER, w); ascii(dst, ": "); writeValue(dst, value) }
-                    else { ascii(dst, ", "); writeValue(dst, value) }
+                    if (!isNameWritten) { isNameWritten = true; writeName(dst, HeaderName.TRAILER, w); dst.writeBytes(COLON_SP); writeValue(dst, value) }
+                    else { dst.writeBytes(COMMA_SP); writeValue(dst, value) }
                     val list = allowed ?: ArrayList<HeaderName>().also { allowed = it }
                     parseNameList(value, list)
                     return@forEach
                 }
             }
-            writeName(dst, name, w); ascii(dst, ": "); writeValue(dst, value); ascii(dst, "\r\n")
+            writeName(dst, name, w); dst.writeBytes(COLON_SP); writeValue(dst, value); dst.writeBytes(CRLF_BYTES)
         }
         if (failed) {
             rewind(dst, origLen)
             return EncodePlan(EncodePlan.LENGTH, 0, null, true, H1EncodeError.UnexpectedHeader)
         }
-        if (isNameWritten) ascii(dst, if (mustWriteChunked) ", chunked\r\n" else "\r\n")
+        if (isNameWritten) dst.writeBytes(if (mustWriteChunked) COMMA_CHUNKED_CRLF else CRLF_BYTES)
 
         if (!wroteLen) {
             when {
                 body == OutgoingBody.UNKNOWN ->
                     if (parts.version == Version.HTTP_10 || !canChunked) kind = EncodePlan.CLOSE_DELIMITED
-                    else { writeName(dst, HeaderName.TRANSFER_ENCODING, w); ascii(dst, ": chunked\r\n"); kind = EncodePlan.CHUNKED }
+                    else { writeName(dst, HeaderName.TRANSFER_ENCODING, w); dst.writeBytes(COLON_CHUNKED_CRLF); kind = EncodePlan.CHUNKED }
                 body == null || body == 0L -> {
                     if (canHaveContentLength(reqMethod, status) && reqMethod != Method.HEAD) {
-                        writeName(dst, HeaderName.CONTENT_LENGTH, w); ascii(dst, ": 0\r\n")
+                        writeName(dst, HeaderName.CONTENT_LENGTH, w); dst.writeBytes(COLON_ZERO_CRLF)
                     }
                     kind = EncodePlan.LENGTH; length = 0
                 }
                 !canHaveContentLength(reqMethod, status) -> { kind = EncodePlan.LENGTH; length = 0 }
                 else -> {
-                    writeName(dst, HeaderName.CONTENT_LENGTH, w); ascii(dst, ": "); ascii(dst, body.toString()); ascii(dst, "\r\n")
+                    writeName(dst, HeaderName.CONTENT_LENGTH, w); dst.writeBytes(COLON_SP); writeDecimal(dst, body); dst.writeBytes(CRLF_BYTES)
                     kind = EncodePlan.LENGTH; length = body
                 }
             }
         }
         if (!canChunked) { kind = EncodePlan.LENGTH; length = 0 }                  // server body forced to 0 (can_have_body)
         if (!wroteDate && dateHeader) {
-            writeName(dst, HeaderName.DATE, w); ascii(dst, ": "); ascii(dst, HttpDate.now()); ascii(dst, "\r\n\r\n")
-        } else ascii(dst, "\r\n")
+            writeName(dst, HeaderName.DATE, w); dst.writeBytes(COLON_SP); dst.writeBytes(HttpDate.nowBytes()); dst.writeBytes(CRLF_CRLF)
+        } else dst.writeBytes(CRLF_BYTES)
         return EncodePlan(kind, length, if (kind == EncodePlan.CHUNKED) allowed else null, isLast, ret)
     }
 
@@ -672,14 +674,14 @@ object ClientHeadEncoder {
         val plan = setLength(parts, body)
         ascii(dst, parts.method.asStr()); dst.writeByte(' '.code.toByte())
         ascii(dst, parts.uri.toString()); dst.writeByte(' '.code.toByte())
-        ascii(dst, if (parts.version == Version.HTTP_10) "HTTP/1.0\r\n" else "HTTP/1.1\r\n")   // HTTP/2 coerced to HTTP/1.1
+        dst.writeBytes(if (parts.version == Version.HTTP_10) HTTP10_CRLF else HTTP11_CRLF)   // HTTP/2 coerced to HTTP/1.1
         val caseMap = parts.extensions.get<HeaderCaseMap>()
         if (caseMap != null) writeHeadersOriginalCase(parts.headers, caseMap, dst, config.titleCaseHeaders)
         else {
             val w = if (config.titleCaseHeaders) OrigCaseWriter(null, true) else null
-            parts.headers.forEach { name, value -> writeName(dst, name, w); ascii(dst, ": "); writeValue(dst, value); ascii(dst, "\r\n") }
+            parts.headers.forEach { name, value -> writeName(dst, name, w); dst.writeBytes(COLON_SP); writeValue(dst, value); dst.writeBytes(CRLF_BYTES) }
         }
-        ascii(dst, "\r\n")
+        dst.writeBytes(CRLF_BYTES)
         return plan
     }
 
@@ -753,6 +755,33 @@ private fun parseNameList(value: HeaderValue, into: MutableList<HeaderName>) {
 
 private fun writeValue(dst: Buffer, v: HeaderValue) = dst.writeBytes(v.array, v.offset, v.length)
 
+private val STATUS_LINE_200 = "HTTP/1.1 200 OK\r\n".encodeToByteArray()
+private val CRLF_BYTES = "\r\n".encodeToByteArray()
+private val COMMA_CHUNKED_CRLF = ", chunked\r\n".encodeToByteArray()
+private val COLON_SP = ": ".encodeToByteArray()
+private val COMMA_SP = ", ".encodeToByteArray()
+private val COLON_CHUNKED_CRLF = ": chunked\r\n".encodeToByteArray()
+private val COLON_ZERO_CRLF = ": 0\r\n".encodeToByteArray()
+private val CRLF_CRLF = "\r\n\r\n".encodeToByteArray()
+private val HTTP10_CRLF = "HTTP/1.0\r\n".encodeToByteArray()
+private val HTTP11_CRLF = "HTTP/1.1\r\n".encodeToByteArray()
+private val COLON_CRLF = ":\r\n".encodeToByteArray()
+private val HTTP10_SP = "HTTP/1.0 ".encodeToByteArray()
+private val HTTP11_SP = "HTTP/1.1 ".encodeToByteArray()
+
+/** Writes [value] ≥ 0 in decimal without creating a String. */
+private fun writeDecimal(dst: Buffer, value: Long) {
+    var digits = 1
+    var v = value
+    while (v >= 10) { v /= 10; digits++ }
+    dst.reserve(digits)
+    val a = dst.backingArray()
+    var at = dst.writerIndex() + digits
+    v = value
+    do { a[--at] = ('0'.code + (v % 10).toInt()).toByte(); v /= 10 } while (v > 0)
+    dst.commitWrite(digits)
+}
+
 private fun ascii(dst: Buffer, s: String) {
     for (c in s) dst.writeByte(c.code.toByte())
 }
@@ -769,7 +798,7 @@ private fun titleCase(dst: Buffer, name: String) {
 
 /** Writes a header name: lower case ([w] null), or through the original-case / title-case writer. */
 private fun writeName(dst: Buffer, name: HeaderName, w: OrigCaseWriter?) {
-    if (w == null) ascii(dst, name.asStr()) else w.write(dst, name)
+    if (w == null) dst.writeBytes(name.bytes) else w.write(dst, name)
 }
 
 /**
@@ -786,7 +815,7 @@ private class OrigCaseWriter(private val map: HeaderCaseMap?, private val titleC
         when {
             v != null && v.hasNext() -> dst.writeBytes(v.next())
             titleCase -> titleCase(dst, name.asStr())
-            else -> ascii(dst, name.asStr())
+            else -> dst.writeBytes(name.bytes)
         }
     }
 }
@@ -796,7 +825,7 @@ internal fun writeHeadersOriginalCase(headers: HeaderMap<HeaderValue>, caseMap: 
     val w = OrigCaseWriter(caseMap, titleCaseHeaders)
     headers.forEach { name, value ->
         w.write(dst, name)
-        if (value.length == 0) ascii(dst, ":\r\n") else { ascii(dst, ": "); writeValue(dst, value); ascii(dst, "\r\n") }
+        if (value.length == 0) dst.writeBytes(COLON_CRLF) else { dst.writeBytes(COLON_SP); writeValue(dst, value); dst.writeBytes(CRLF_BYTES) }
     }
 }
 
@@ -837,13 +866,22 @@ private const val LF = '\n'.code.toByte()
 /** The IMF-fixdate `Date` value (29 bytes), recomputed at most once per second per thread (hyper `common/date.rs`). */
 internal object HttpDate {
     @kotlin.native.concurrent.ThreadLocal
-    private object Cache { var second = Long.MIN_VALUE; var value = "" }
+    private object Cache { var second = Long.MIN_VALUE; var value = ""; var bytes = ByteArray(0) }
 
     fun now(): String {
-        val ms = neton.io.core.systemTimeMillis()
-        val sec = ms / 1000
-        if (sec != Cache.second) { Cache.second = sec; Cache.value = format(sec) }
+        refresh()
         return Cache.value
+    }
+
+    /** The current value as bytes (the same array until the second changes; do not modify it). */
+    fun nowBytes(): ByteArray {
+        refresh()
+        return Cache.bytes
+    }
+
+    private fun refresh() {
+        val sec = neton.io.core.systemTimeMillis() / 1000
+        if (sec != Cache.second) { Cache.second = sec; Cache.value = format(sec); Cache.bytes = Cache.value.encodeToByteArray() }
     }
 
     private val DAYS = arrayOf("Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed")
