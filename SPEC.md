@@ -662,3 +662,14 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 - 未完成：hyper 的 h2 接线（hyper 的默认值、BDP 自适应窗口、keep-alive ping、头部剥离、CONNECT 隧道）与 h2spec、性能对照。
 - 合入 HTTP/2 后的 Linux 验收（153）：1114 个测试（14 个与参考一致地忽略）在 epoll 与 io_uring 上全过。
 - 请求体数据帧不超过 16 KiB 时复制出读缓冲（切片会使连接的下一次读换新数组：带体请求每个一次整缓冲分配；64 字节 POST 实测每请求分配 28.1 → 27.1，且去掉了 8 KiB 数组）。
+- 单核尾延迟的机制与处置（2026-09-28，153）：
+  - 分配继续减少（`HeaderMap` 每项的哈希与链接合并为一个数组；`Body.exactLength` 免去 `SizeHint`）：每请求 14,559 Ir、19 次分配。
+  - GC 统计（`GCInfo`）：单核上每次回收的"请求暂停 → 暂停开始"（到达安全点）为 5,990 µs、暂停本身 12–15 µs、34 次/s；两核上到达安全点
+    0–8 µs。对 GC 线程 `perf record -e cpu-clock`：约 80% 在 `sched_yield`（协调者等待安全点的自旋），标记与清扫不到 10%。即：单核上 GC 线程
+    自旋占住整个 CFS 时间片（≈6 ms），它所等待的反应器却无法运行。
+  - 堆下限：此前"`setMinHeap` 不改变"的结论无效——基准服务从未调用 `GcTuning.fromEnvironment()`。实际应用后，64 MiB 使回收降到 2 次/s、
+    256 MiB 约 1 次/s，p90 3.65 → 0.49 ms，但 p99 仍 5.5–7.7 ms（每次回收仍要 6 ms 到达安全点）。
+  - 处置：neton-io `GcTuning.lowerGcThreadPriority`（`NETON_IO_GC_THREAD_NICE`，Linux / Android，应用自行选择、库不默认设置）降低 GC 线程的
+    调度优先级：到达安全点 1 µs，单核 p99 7.0 → 0.94 ms；60 s、200 连接满载单核下 RSS 稳定约 19 MB，回收 23–26 次/s，GC 跟得上。
+  - 单核交替对照（该选项开启）：50 连接 neton 132–136k、p99 0.93–0.96 ms，hyper 156–157k、p99 0.39–0.42 ms（吞吐约 0.86 倍）；200 连接
+    neton 108–133k、p99 2.75–3.13 ms，hyper 134–156k、p99 1.49–1.96 ms。
