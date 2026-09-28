@@ -9,6 +9,8 @@ kotlin {
             executable("helloServerProfile") { entryPoint = "neton.http.bench.main"; freeCompilerArgs += "-g" }
             // The curl interop check (SPEC §6).
             executable("echoServer") { entryPoint = "neton.http.bench.echoMain" }
+            // The client side of the comparison (SPEC §8).
+            executable("helloClient") { entryPoint = "neton.http.bench.clientMain" }
         }
     }
     sourceSets {
