@@ -786,4 +786,11 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
     `Method.equals`，`method == Method.HEAD` 等比较变成虚调用。标准方法只以共享常量存在（构造器私有，解析返回常量），故 `equals`
     只对扩展方法比较名字，HTTP/1 路径与常量按同一性比较。hello 回到约 11,626。
   - 方法解析：GET / PUT / POST / HEAD 按长度后直接比较字节，范围检查内联：hello 约 11,626 → **约 11,490**（hyper 6,549）。
+- HTTP/1 客户端性能对照（2026-09-28，153，cachegrind；客户端在 cachegrind 下、服务端为原生 hyper-hello；10 个保活连接顺序 GET，
+  逐个读完响应体；对照为 hyper 1.11.1 `client::conn::http1`，同形态，current-thread 运行时）：
+  - 起点 neton 60,900 对 hyper 17,260 Ir/请求（3.5 倍）；主要成本在 kotlinx.coroutines：每个请求若干 `CompletableDeferred`、每个空闲期
+    launch 一个读协程，以及每次可取消挂起的父句柄登记。
+  - 调用方、连接与空闲读之间的交接改为可复用的单等待者信号（`Signal` / `Slot`），空闲读由常驻协程完成 → 45,000。
+  - `run()` 成为连接唯一的读者、空闲时自己停在读上；请求头由调用方写（写锁排序），因此请求无需唤醒连接，结束空闲读的字节即其响应；
+    请求体仍由子协程与读响应并行写（hyper 允许服务端提前响应）→ **约 35,050**（约 2.0 倍）。两种传输下全量测试通过。
 
