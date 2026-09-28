@@ -446,6 +446,45 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
         }
     }
 
+    /**
+     * Writes [body]'s frames (hyper `Dispatcher::poll_write` body loop) until the body or the write side ends, then
+     * flushes. A frame that is not ready at once makes the buffered bytes go out first, as hyper flushes when the body
+     * is pending; [onPending] is told then too. [frames] runs the body's `nextFrame` calls.
+     */
+    suspend fun pumpBody(body: neton.http.Body, frames: InlineCall<neton.http.Body, Frame?>, onPending: () -> Unit) {
+        while (canWriteBody) {
+            if (!io.canBuffer) flushLocked()
+            val r = try { frames.start(body) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Throwable) { throw HttpError(HttpError.Kind.UserBody, e) }
+            val frame = if (r !== kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED) r as Frame? else {
+                flushLocked()
+                onPending()
+                try { frames.await() } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Throwable) { throw HttpError(HttpError.Kind.UserBody, e) }
+            }
+            if (frame == null) {
+                io.writeLock.withLock { endBody() }
+                break
+            }
+            if (frame is Frame.Data) {
+                val data = frame.bytes
+                if (body.isEndStream) {
+                    io.writeLock.withLock { if (data.size == 0) endBody() else writeBodyAndEnd(data) }
+                    break
+                }
+                if (data.size == 0) continue
+                io.writeLock.withLock { writeBody(data) }
+            } else if (frame is Frame.Trailers) {
+                io.writeLock.withLock {
+                    writeTrailers(frame.headers)
+                    if (canWriteBody) endBody()
+                }
+                break
+            }
+        }
+        flushLocked()
+    }
+
+    suspend fun flushLocked() = io.writeLock.withLock { flush() }
+
     /** hyper `poll_flush` + `try_keep_alive`. */
     suspend fun flush() {
         try {

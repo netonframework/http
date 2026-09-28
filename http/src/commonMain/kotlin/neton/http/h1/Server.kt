@@ -257,43 +257,19 @@ class Http1Connection internal constructor(private val stream: IoStream, private
             if (conn.isWriteClosed) { flushLocked(); throw e }
         }
         if (bodyLen != null) {
-            while (conn.canWriteBody) {
-                if (!io.canBuffer) flushLocked()
-                val frame = nextFrame(body)
-                if (frame == null) {
-                    io.writeLock.withLock { conn.endBody() }
-                    break
-                }
-                if (frame is Frame.Data) {
-                    val data = frame.bytes
-                    if (body.isEndStream) {
-                        io.writeLock.withLock { if (data.size == 0) conn.endBody() else conn.writeBodyAndEnd(data) }
-                        break
-                    }
-                    if (data.size == 0) continue
-                    io.writeLock.withLock { conn.writeBody(data) }
-                } else if (frame is Frame.Trailers) {
-                    io.writeLock.withLock {
-                        conn.writeTrailers(frame.headers)
-                        if (conn.canWriteBody) conn.endBody()
-                    }
-                    break
-                }
+            try {
+                conn.pumpBody(body, frameCall, onPending)
+            } catch (e: CancellationException) {
+                throw watchError ?: e
             }
+        } else {
+            flushLocked()
         }
-        flushLocked()
     }
 
-    /** The body's next frame; when it is not ready at once, what is buffered is flushed first (hyper's poll order). */
-    private suspend fun nextFrame(body: Body): Frame? {
-        val r = try { frameCall.start(body) } catch (e: CancellationException) { throw e } catch (e: Throwable) { throw HttpError(HttpError.Kind.UserBody, e) }
-        if (r !== COROUTINE_SUSPENDED) return r as Frame?
-        flushLocked()
-        maybeStartWatch()
-        return try { frameCall.await() } catch (e: CancellationException) { throw watchError ?: e } catch (e: Throwable) { throw HttpError(HttpError.Kind.UserBody, e) }
-    }
+    private suspend fun flushLocked() = conn.flushLocked()
 
-    private suspend fun flushLocked() = io.writeLock.withLock { conn.flush() }
+    private val onPending: () -> Unit = { maybeStartWatch() }
 
     /**
      * hyper `mid_message_detect_eof`: while an exchange is in progress and the request has been read, read ahead to
