@@ -780,4 +780,10 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
     就绪事件前不读新连接、每轮每连接至多读一次，TCP 下这些顺序（HTTP/2 允许的其他顺序）无法确定化，不削弱断言就无法迁移。
     这些库路径在 TCP 上另由 hyper 层 HTTP/2 用例、`TcpEndToEndTest`、`HammerTest` 与 h2spec 覆盖。
     另 `timeoutsNeedReadTimeoutCapability` 断言的是无 ReadTimeout 能力的流，TCP 流有此能力，保持内存传输。
+- 其后（2026-09-28，153，cachegrind）：
+  - 头部名扫描每次载入 8 字节、在寄存器内逐字节查 tchar 位图（展开），浏览器式约 26,070 → 25,710；差分测试 `ScanWordTest` 对照逐字节循环。
+  - 二分定位一处 HTTP/1 回退（约 +100 Ir）：出现在"头部值按字比较"提交之后，但原因不在该改动——代码尺寸变化使编译器不再内联
+    `Method.equals`，`method == Method.HEAD` 等比较变成虚调用。标准方法只以共享常量存在（构造器私有，解析返回常量），故 `equals`
+    只对扩展方法比较名字，HTTP/1 路径与常量按同一性比较。hello 回到约 11,626。
+  - 方法解析：GET / PUT / POST / HEAD 按长度后直接比较字节，范围检查内联：hello 约 11,626 → **约 11,490**（hyper 6,549）。
 
