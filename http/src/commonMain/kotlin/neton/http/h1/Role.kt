@@ -64,6 +64,8 @@ class H1Config(
     val preserveHeaderCase: Boolean = false,
     /** Client: accept an HTTP/0.9 response to the first request (hyper `http09_responses`). */
     val h09Responses: Boolean = false,
+    /** ⚖️ Server: request body limit (SPEC §3.7); 0 disables. */
+    val maxRequestBodySize: Long = 0,
 )
 
 /** A reason phrase different from the canonical one (hyper `ext::ReasonPhrase`), kept as an extension. */
