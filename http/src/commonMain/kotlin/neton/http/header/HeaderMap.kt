@@ -375,19 +375,16 @@ class HeaderMap<T>() {
 
     /** Visits every (name, value) pair in [iter] order without allocating. The map must not be modified meanwhile. */
     inline fun forEach(action: (name: HeaderName, value: T) -> Unit) {
+        // One loop with a single call of [action]: an inline lambda is copied at every call site, and K/N zeroes the
+        // caller's whole frame (all the copies' temporaries) on each entry.
         val expected = modCount
         var i = 0
+        var x = -1   // -1: entry i's first value; >= 0: the extra value x of entry i
         while (i < entryCount) {
-            val name = keys[i]!!
-            action(name, vals[i] as T)
+            action(keys[i]!!, (if (x < 0) vals[i] else extraVals[x]) as T)
             if (modCount != expected) throw ConcurrentModificationException()
-            var x = entryMeta[META_STRIDE * (i) + 1]
-            while (x >= 0) {
-                action(name, extraVals[x] as T)
-                if (modCount != expected) throw ConcurrentModificationException()
-                x = extraNext[x]
-            }
-            i++
+            x = if (x < 0) entryMeta[META_STRIDE * i + 1] else extraNext[x]
+            if (x < 0) i++
         }
     }
 
