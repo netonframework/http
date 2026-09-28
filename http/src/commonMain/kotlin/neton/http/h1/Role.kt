@@ -280,8 +280,7 @@ class ServerHeadParser(val config: H1Config = H1Config()) {
             if (!config.lenientTeWithCl) return fail(H1ParseError.TransferEncodingWithContentLength)
             keepAlive = false
         }
-        val extensions = Extensions()
-        if (caseMap != null) extensions.insert(caseMap)
+        val extensions = if (caseMap != null) Extensions().also { it.insert(caseMap) } else null
         parts = RequestParts(method, uri, version, headers, extensions)
         this.bodyLength = decoder
         this.expectContinue = expectContinue
@@ -383,9 +382,9 @@ class ClientHeadParser(val config: H1Config = H1Config()) {
                 caseMap?.append(name, head.copyOfRange(slots.nameStart[i] - at, slots.nameEnd[i] - at))
                 headers.append(name, value)
             }
-            val extensions = Extensions()
-            if (caseMap != null) extensions.insert(caseMap)
-            if (reason != null) extensions.insert(reason)
+            val extensions = if (caseMap != null || reason != null) Extensions() else null
+            if (caseMap != null) extensions!!.insert(caseMap)
+            if (reason != null) extensions!!.insert(reason)
             val p = ResponseParts(status, version, headers, extensions)
             at += consumed
             val length = decoder(p, reqMethod)
@@ -559,7 +558,7 @@ object ServerHeadEncoder {
         }
         val origLen = dst.readableBytes
         val status = parts.status
-        val reason = parts.extensions.get<ReasonPhrase>()
+        val reason = parts.extensionsOrNull?.get<ReasonPhrase>()
         if (parts.version == Version.HTTP_11 && status == StatusCode.OK && reason == null) {
             dst.writeBytes(STATUS_LINE_200)
         } else {
@@ -569,7 +568,7 @@ object ServerHeadEncoder {
             dst.writeBytes(CRLF_BYTES)
         }
 
-        val caseMap = parts.extensions.get<HeaderCaseMap>()
+        val caseMap = parts.extensionsOrNull?.get<HeaderCaseMap>()
         val w = if (caseMap != null || config.titleCaseHeaders) OrigCaseWriter(caseMap, config.titleCaseHeaders) else null
         val canChunked = canChunked(reqMethod, status)
         var kind = EncodePlan.LENGTH
@@ -582,7 +581,7 @@ object ServerHeadEncoder {
         var prevConLen = -1L
         var failed = false
 
-        parts.headers.forEach { name, value ->
+        parts.headersOrNull?.forEach { name, value ->
             if (failed) return@forEach
             if (name !== curName) {
                 // A new name: finish a joined line left open by the previous one (handle_is_name_written).

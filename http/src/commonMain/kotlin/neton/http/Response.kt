@@ -8,9 +8,27 @@ import neton.http.header.HeaderValue
 class ResponseParts(
     var status: StatusCode = StatusCode.DEFAULT,
     var version: Version = Version.DEFAULT,
-    var headers: HeaderMap<HeaderValue> = HeaderMap.new(),
-    var extensions: Extensions = Extensions(),
+    headers: HeaderMap<HeaderValue>? = null,
+    extensions: Extensions? = null,
 ) {
+    // Created when first used: a message without headers or extensions allocates neither (as the http crate).
+    private var headersField: HeaderMap<HeaderValue>? = headers
+    private var extensionsField: Extensions? = extensions
+
+    var headers: HeaderMap<HeaderValue>
+        get() = headersField ?: HeaderMap.new().also { headersField = it }
+        set(value) { headersField = value }
+
+    var extensions: Extensions
+        get() = extensionsField ?: Extensions().also { extensionsField = it }
+        set(value) { extensionsField = value }
+
+    /** The headers if any were set, without creating an empty map. */
+    internal val headersOrNull: HeaderMap<HeaderValue>? get() = headersField
+
+    /** The extensions if any were set, without creating an empty set. */
+    internal val extensionsOrNull: Extensions? get() = extensionsField
+
     override fun toString(): String = "Parts { status: $status, version: $version, headers: $headers }"
 }
 

@@ -1,6 +1,5 @@
 package neton.http.h1
 
-import kotlinx.coroutines.sync.Mutex
 import neton.io.bytes.Buffer
 import neton.io.bytes.Bytes
 import neton.io.core.IoStream
@@ -42,7 +41,7 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
     private var queuedBytes = 0L
 
     /** One writer at a time: the connection and, for `100 Continue`, a request body read elsewhere. */
-    val writeLock = Mutex()
+    val writeLock = WriteGate()
 
     /** Bytes waiting to be written. */
     val buffered: Long get() = head.readableBytes + queuedBytes + framingBytes()

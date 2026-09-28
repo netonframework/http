@@ -1,6 +1,5 @@
 package neton.http.h1
 
-import kotlinx.coroutines.sync.withLock
 import neton.http.Frame
 import neton.http.HttpError
 import neton.http.Method
