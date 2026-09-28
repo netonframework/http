@@ -217,8 +217,11 @@ class ParsedResponse(
     fun reasonString(): String? = if (reasonStart < 0) null else bytes!!.decodeToString(reasonStart, reasonEnd)
 }
 
-internal fun checkRange(bytes: ByteArray, offset: Int, length: Int) {
-    if (offset < 0 || length < 0 || offset > bytes.size - length) {
-        throw IndexOutOfBoundsException("offset=$offset length=$length size=${bytes.size}")
-    }
+// Inline check, message built out of line: the string template's temporaries made every call zero a frame.
+@Suppress("NOTHING_TO_INLINE")
+internal inline fun checkRange(bytes: ByteArray, offset: Int, length: Int) {
+    if (offset < 0 || length < 0 || offset > bytes.size - length) rangeError(offset, length, bytes.size)
 }
+
+internal fun rangeError(offset: Int, length: Int, size: Int): Nothing =
+    throw IndexOutOfBoundsException("offset=$offset length=$length size=$size")

@@ -198,8 +198,11 @@ internal inline fun parseUtf8Input(
     return if (firstInvalidUtf8(bytes, offset + pqStart, keep) >= 0) InvalidUri.ErrorKind.InvalidUriChar else r
 }
 
-internal fun checkRange(size: Int, offset: Int, length: Int) {
-    if (offset < 0 || length < 0 || offset > size - length) {
-        throw IndexOutOfBoundsException("offset=$offset length=$length size=$size")
-    }
+// Inline check, message built out of line: the string template's temporaries made every call zero a frame.
+@Suppress("NOTHING_TO_INLINE")
+internal inline fun checkRange(size: Int, offset: Int, length: Int) {
+    if (offset < 0 || length < 0 || offset > size - length) rangeError(offset, length, size)
 }
+
+internal fun rangeError(offset: Int, length: Int, size: Int): Nothing =
+    throw IndexOutOfBoundsException("offset=$offset length=$length size=$size")

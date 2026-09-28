@@ -237,11 +237,14 @@ private fun buildHeaderChars(foldUppercase: Boolean, allowQuote: Boolean): ByteA
 /** Maps a UTF-16 code unit to a table index; anything non-ASCII maps to 128, which every table rejects. */
 internal fun charToByte(code: Int): Int = if (code < 128) code else 128
 
-internal fun checkRange(size: Int, offset: Int, length: Int) {
-    if (offset < 0 || length < 0 || offset > size - length) {
-        throw IndexOutOfBoundsException("offset $offset, length $length, size $size")
-    }
+// Inline check, message built out of line: the string template's temporaries made every call zero a frame.
+@Suppress("NOTHING_TO_INLINE")
+internal inline fun checkRange(size: Int, offset: Int, length: Int) {
+    if (offset < 0 || length < 0 || offset > size - length) rangeError(offset, length, size)
 }
+
+internal fun rangeError(offset: Int, length: Int, size: Int): Nothing =
+    throw IndexOutOfBoundsException("offset $offset, length $length, size $size")
 
 // ===== hashing =====
 
