@@ -1,7 +1,6 @@
 plugins { kotlin("multiplatform") }
 
-// Same targets as com.netonstream:io. The common HTTP types (SPEC §2) are pure Kotlin in commonMain; the
-// connection layers (h1, h2) will add the io dependency.
+// Same targets as com.netonstream:io (resolved from mavenLocal until 0.2.0 is on Maven Central).
 kotlin {
     linuxX64(); linuxArm64()
     macosArm64(); macosX64()
@@ -10,6 +9,7 @@ kotlin {
     androidNativeArm64(); androidNativeArm32(); androidNativeX64(); androidNativeX86()
 
     sourceSets {
+        commonMain.dependencies { api("com.netonstream:io:0.2.0-SNAPSHOT") }
         commonTest.dependencies { implementation(kotlin("test")) }
     }
 }
