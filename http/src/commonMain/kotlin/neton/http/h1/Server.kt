@@ -271,11 +271,10 @@ class Http1Connection internal constructor(private val stream: IoStream, private
                 if (r === COROUTINE_SUSPENDED) { maybeStartWatch(); serviceCall.await() } else r as Response<out Body>
             } catch (e: CancellationException) {
                 throw watchError ?: e
-            } catch (e: HttpError) {
-                throw e
             } catch (e: Throwable) {
+                // The body's own limit error, however the service passed it on: 413 while no head is out yet.
                 if (conn.canWriteHead && e.isBodyTooLarge()) { rejectBodyTooLarge(); throw conn.error!! }
-                throw HttpError(HttpError.Kind.UserService, e)
+                throw if (e is HttpError) e else HttpError(HttpError.Kind.UserService, e)
             }
             writeResponse(response)
         } finally {
