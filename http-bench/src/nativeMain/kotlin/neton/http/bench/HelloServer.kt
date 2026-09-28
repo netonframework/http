@@ -23,8 +23,10 @@ fun main(args: Array<String>) {
     val pipelineFlush = args.getOrElse(3) { "0" } == "1"
     // NETON_HTTP_TIMEOUTS=0 turns the header / keep-alive timeouts off (to measure what they cost).
     val timeouts = platform.posix.getenv("NETON_HTTP_TIMEOUTS")?.toKString() != "0"
-    val config = if (timeouts) Http1ServerConfig(pipelineFlush = pipelineFlush)
-    else Http1ServerConfig(pipelineFlush = pipelineFlush, headerReadTimeoutMillis = 0, keepAliveIdleTimeoutMillis = 0)
+    // NETON_HTTP_WRITEV=0 selects the flatten write strategy (hyper `writev(false)`).
+    val writev = platform.posix.getenv("NETON_HTTP_WRITEV")?.toKString()?.let { it != "0" }
+    val config = if (timeouts) Http1ServerConfig(pipelineFlush = pipelineFlush, writev = writev)
+    else Http1ServerConfig(pipelineFlush = pipelineFlush, writev = writev, headerReadTimeoutMillis = 0, keepAliveIdleTimeoutMillis = 0)
     val hello = Bytes.copyOf("Hello, World!".encodeToByteArray())   // shared, like hyper's static `Bytes`
     // The application decides process-wide GC settings (neton-io SPEC §26.8): NETON_IO_GC_MIN_HEAP_MB applies a heap floor.
     val minHeap = neton.io.net.GcTuning.fromEnvironment()

@@ -79,6 +79,10 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
     fun bufferData(data: Bytes) {
         if (data.size == 0) return
         if (!queueStrategy) { head.writeBytes(data); return }
+        // ⚖️ Small data is copied behind the framing instead of queued by reference (hyper queues everything): a
+        // vectored write of a separate small slice cost more than the copy (hello world: 14.2k vs 13.0k instructions
+        // per request). Large data stays zero-copy. The bytes on the wire are the same.
+        if (data.size < QUEUE_MIN_BYTES) { framingBuf().writeBytes(data); return }
         if (segmentCount == 0) segments[segmentCount++] = head
         if (queuedBuffers == wrappers.size) wrappers = wrappers.copyOf(queuedBuffers * 2)
         val w = wrappers[queuedBuffers] ?: Buffer(16).also { wrappers[queuedBuffers] = it }
@@ -150,5 +154,7 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
         const val MINIMUM_MAX_BUFFER_SIZE = INIT_BUFFER_SIZE
         const val DEFAULT_MAX_BUFFER_SIZE = 8192 + 4096 * 100
         const val MAX_BUF_LIST_BUFFERS = 16
+        /** Body data smaller than this is copied into the write buffer; larger data is queued by reference. */
+        const val QUEUE_MIN_BYTES = 1024
     }
 }
