@@ -521,12 +521,10 @@ enum class H1EncodeError { UnexpectedHeader, UnsupportedStatusCode }
 /** Encodes response heads (hyper `Server::encode` + `encode_headers`). */
 object ServerHeadEncoder {
     fun canChunked(method: Method?, status: StatusCode): Boolean =
-        !(method == Method.HEAD || method == Method.CONNECT && status.isSuccess() || status.isInformational()) &&
-            status != StatusCode.NO_CONTENT && status != StatusCode.NOT_MODIFIED
+        status.asU16().let { c -> !(method == Method.HEAD || method == Method.CONNECT && c in 200..299 || c in 100..199) && c != 204 && c != 304 }
 
     fun canHaveContentLength(method: Method?, status: StatusCode): Boolean =
-        !(status.isInformational() || method == Method.CONNECT && status.isSuccess()) &&
-            status != StatusCode.NO_CONTENT && status != StatusCode.NOT_MODIFIED
+        status.asU16().let { c -> !(c in 100..199 || method == Method.CONNECT && c in 200..299) && c != 204 && c != 304 }
 
     /**
      * Appends the status line and headers of [parts] to [dst]. [body]: null (no body), [OutgoingBody.UNKNOWN] or a
@@ -547,7 +545,7 @@ object ServerHeadEncoder {
         var body = body
         val status0 = parts.status
         when {
-            status0 == StatusCode.SWITCHING_PROTOCOLS -> isLast = true
+            status0.asU16() == 101 -> isLast = true
             reqMethod == Method.CONNECT && status0.isSuccess() -> { wroteLen = true; isLast = true }   // no CL / TE (RFC 7231)
             status0.isInformational() -> {
                 // hyper: a service cannot return a 1xx response; a default 500 head goes out instead.
@@ -560,7 +558,7 @@ object ServerHeadEncoder {
         val origLen = dst.readableBytes
         val status = parts.status
         val reason = parts.extensionsOrNull?.get<ReasonPhrase>()
-        if (parts.version == Version.HTTP_11 && status == StatusCode.OK && reason == null) {
+        if (status.asU16() == 200 && parts.version == Version.HTTP_11 && reason == null) {
             dst.writeBytes(STATUS_LINE_200)
         } else {
             dst.writeBytes(if (parts.version == Version.HTTP_10) HTTP10_SP else HTTP11_SP)   // HTTP/2 coerced to HTTP/1.1

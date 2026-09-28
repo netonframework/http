@@ -34,9 +34,9 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
     @PublishedApi internal val head = Buffer(INIT_BUFFER_SIZE, pooled = true)
     @PublishedApi internal val segments = Array(2 * MAX_BUF_LIST_BUFFERS + 2) { head }
     @PublishedApi internal var segmentCount = 0
-    private val framing = ArrayList<Buffer>()
+    private var framing = arrayOfNulls<Buffer>(4)
     private var framingUsed = 0
-    private val wrappers = ArrayList<Buffer>()
+    private var wrappers = arrayOfNulls<Buffer>(4)
     private var queuedBuffers = 0
     private var queuedBytes = 0L
 
@@ -48,7 +48,7 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
 
     private fun framingBytes(): Long {
         var n = 0L
-        for (i in 0 until framingUsed) n += framing[i].readableBytes
+        for (i in 0 until framingUsed) n += framing[i]!!.readableBytes
         return n
     }
 
@@ -63,7 +63,8 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
         if (!queueStrategy || segmentCount == 0) return head
         val last = segments[segmentCount - 1]
         if (last === head || isFraming(last)) return last
-        val f = if (framingUsed < framing.size) framing[framingUsed] else Buffer(64).also { framing.add(it) }
+        if (framingUsed == framing.size) framing = framing.copyOf(framingUsed * 2)
+        val f = framing[framingUsed] ?: Buffer(64).also { framing[framingUsed] = it }
         framingUsed++
         segments[segmentCount++] = f
         return f
@@ -79,7 +80,8 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
         if (data.size == 0) return
         if (!queueStrategy) { head.writeBytes(data); return }
         if (segmentCount == 0) segments[segmentCount++] = head
-        val w = if (queuedBuffers < wrappers.size) wrappers[queuedBuffers] else Buffer(16).also { wrappers.add(it) }
+        if (queuedBuffers == wrappers.size) wrappers = wrappers.copyOf(queuedBuffers * 2)
+        val w = wrappers[queuedBuffers] ?: Buffer(16).also { wrappers[queuedBuffers] = it }
         w.borrow(data)
         segments[segmentCount++] = w
         queuedBuffers++
@@ -111,8 +113,8 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
         head.clear()
         for (i in 0 until segmentCount) segments[i] = head
         segmentCount = 0
-        for (i in 0 until queuedBuffers) wrappers[i].borrow(Bytes.EMPTY)      // do not keep the sent data alive
-        for (i in 0 until framingUsed) framing[i].clear()
+        for (i in 0 until queuedBuffers) wrappers[i]!!.borrow(Bytes.EMPTY)      // do not keep the sent data alive
+        for (i in 0 until framingUsed) framing[i]!!.clear()
         framingUsed = 0
         queuedBuffers = 0
         queuedBytes = 0
