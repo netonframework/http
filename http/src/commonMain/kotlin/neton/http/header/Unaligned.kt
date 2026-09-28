@@ -1,13 +1,20 @@
+@file:OptIn(kotlin.experimental.ExperimentalNativeApi::class)
+
 package neton.http.header
+
+import kotlin.native.getIntAt
+import kotlin.native.getLongAt
 
 // Little-endian loads of several bytes at once (bounds-checked), for comparisons a word at a time: a byte loop costs a
 // safepoint poll and two bounds checks per byte on K/N.
 
 /** The 8 bytes at [index] as a little-endian Long. */
-internal expect fun ByteArray.loadLongLe(index: Int): Long
+@Suppress("NOTHING_TO_INLINE")
+internal inline fun ByteArray.loadLongLe(index: Int): Long = getLongAt(index)
 
 /** The 4 bytes at [index] as a little-endian Int. */
-internal expect fun ByteArray.loadIntLe(index: Int): Int
+@Suppress("NOTHING_TO_INLINE")
+internal inline fun ByteArray.loadIntLe(index: Int): Int = getIntAt(index)
 
 /**
  * How many chunks [chunkAt] splits a run of [len] bytes into: 8-byte words when [len] >= 8 (the last one overlapping
