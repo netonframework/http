@@ -286,6 +286,11 @@ class Http2ClientConnection internal constructor(
                         h2.run()
                     } catch (e: H2Error) {
                         outcome = e
+                    } finally {
+                        // The h2 connection is gone: the dispatcher ends with it (hyper's `ClientTask` sees
+                        // `poll_ready` fail), so the handles report closed before the streams' coroutines, woken with
+                        // the connection's end, see their errors.
+                        closed = true
                     }
                 }
                 val ponger = if (pingConfig.isEnabled) startPonger(runner) { outcome = it } else null
