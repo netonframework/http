@@ -227,7 +227,7 @@ class ServerHeadParser(val config: H1Config = H1Config()) {
         val consumed = st
         // The URI and request-line limits come first (hyper checks the URI right after parsing; the partial path does too).
         if (req.pathEnd - req.pathStart > MAX_URI_LEN) return fail(H1ParseError.UriTooLong)
-        if (requestLineLength(buf) > config.maxRequestLineSize) return fail(H1ParseError.UriTooLong)
+        if (requestLineLength() > config.maxRequestLineSize) return fail(H1ParseError.UriTooLong)
         if (consumed > config.maxHeaderSectionSize) return fail(H1ParseError.TooLarge)
         val method = Method.tryFromBytes(buf, req.methodStart, req.methodEnd - req.methodStart) ?: return fail(H1ParseError.Method)
         val isHttp11 = req.version == 1
@@ -297,12 +297,12 @@ class ServerHeadParser(val config: H1Config = H1Config()) {
         return false
     }
 
-    /** Length of the request line (method ... version), skipping leading empty lines as httparse does. */
-    private fun requestLineLength(buf: ByteArray): Int {
-        var i = req.methodStart
-        while (i < buf.size && buf[i] != '\n'.code.toByte()) i++
-        return i - req.methodStart
-    }
+    /**
+     * Length of the request line from the parsed positions: method, target and ` HTTP/1.x` (the target is the only
+     * unbounded part). Exact with single-space delimiters (the default); with several spaces allowed it undercounts by
+     * the extra spaces, which the head size limit still bounds.
+     */
+    private fun requestLineLength(): Int = req.pathEnd - req.methodStart + 9
 
     companion object {
         /** hyper `MAX_URI_LEN`: u16::MAX - 1. */
@@ -666,14 +666,16 @@ object ServerHeadEncoder {
                 }
                 !canHaveContentLength(reqMethod, status) -> { kind = EncodePlan.LENGTH; length = 0 }
                 else -> {
-                    writeName(dst, HeaderName.CONTENT_LENGTH, w); dst.writeBytes(COLON_SP); writeDecimal(dst, body); dst.writeBytes(CRLF_BYTES)
+                    if (w == null) dst.writeBytes(CONTENT_LENGTH_PREFIX) else { writeName(dst, HeaderName.CONTENT_LENGTH, w); dst.writeBytes(COLON_SP) }
+                    writeDecimal(dst, body); dst.writeBytes(CRLF_BYTES)
                     kind = EncodePlan.LENGTH; length = body
                 }
             }
         }
         if (!canChunked) { kind = EncodePlan.LENGTH; length = 0 }                  // server body forced to 0 (can_have_body)
         if (!wroteDate && dateHeader) {
-            writeName(dst, HeaderName.DATE, w); dst.writeBytes(COLON_SP); dst.writeBytes(HttpDate.nowBytes()); dst.writeBytes(CRLF_CRLF)
+            if (w == null) dst.writeBytes(HttpDate.lineBytes())            // `date: <value>\r\n\r\n` in one write
+            else { writeName(dst, HeaderName.DATE, w); dst.writeBytes(COLON_SP); dst.writeBytes(HttpDate.nowBytes()); dst.writeBytes(CRLF_CRLF) }
         } else dst.writeBytes(CRLF_BYTES)
         return into.set(kind, length, if (kind == EncodePlan.CHUNKED) allowed else null, isLast, ret)
     }
@@ -771,6 +773,7 @@ private fun writeValue(dst: Buffer, v: HeaderValue) = dst.writeBytes(v.array, v.
 private val STATUS_LINE_200 = "HTTP/1.1 200 OK\r\n".encodeToByteArray()
 private val CRLF_BYTES = "\r\n".encodeToByteArray()
 private val COMMA_CHUNKED_CRLF = ", chunked\r\n".encodeToByteArray()
+private val CONTENT_LENGTH_PREFIX = "content-length: ".encodeToByteArray()
 private val COLON_SP = ": ".encodeToByteArray()
 private val COMMA_SP = ", ".encodeToByteArray()
 private val COLON_CHUNKED_CRLF = ": chunked\r\n".encodeToByteArray()
@@ -880,7 +883,7 @@ private const val LF = '\n'.code.toByte()
 internal object HttpDate {
     @kotlin.native.concurrent.ThreadLocal
     private object Cache {
-        var second = Long.MIN_VALUE; var value = ""; var bytes = ByteArray(0)
+        var second = Long.MIN_VALUE; var value = ""; var bytes = ByteArray(0); var line = ByteArray(0)
         /** Monotonic time of the next second boundary: until then the value cannot change. */
         var nextCheckNanos = Long.MIN_VALUE
     }
@@ -888,6 +891,12 @@ internal object HttpDate {
     fun now(): String {
         refresh()
         return Cache.value
+    }
+
+    /** The whole lowercase header line and the end of the head: `date: <value>\r\n\r\n` (same lifetime as [nowBytes]). */
+    fun lineBytes(): ByteArray {
+        refresh()
+        return Cache.line
     }
 
     /** The current value as bytes (the same array until the second changes; do not modify it). */
@@ -903,7 +912,7 @@ internal object HttpDate {
         if (now < Cache.nextCheckNanos) return
         val ms = neton.io.core.systemTimeMillis()
         val sec = ms / 1000
-        if (sec != Cache.second) { Cache.second = sec; Cache.value = format(sec); Cache.bytes = Cache.value.encodeToByteArray() }
+        if (sec != Cache.second) { Cache.second = sec; Cache.value = format(sec); Cache.bytes = Cache.value.encodeToByteArray(); Cache.line = "date: ${Cache.value}\r\n\r\n".encodeToByteArray() }
         Cache.nextCheckNanos = now + (1000 - ms % 1000) * 1_000_000
     }
 
