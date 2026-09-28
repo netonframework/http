@@ -37,7 +37,7 @@ class CodecReadTest {
     }
 
     @Test
-    @Ignore
+    @Ignore // #[ignore] in the reference, an empty placeholder there (tests/codec_read.rs)
     fun readFrameTooBig() {
     }
 
@@ -127,17 +127,17 @@ class CodecReadTest {
     // ===== HEADERS =====
 
     @Test
-    @Ignore
+    @Ignore // #[ignore] in the reference, an empty placeholder there (tests/codec_read.rs)
     fun readHeadersWithoutPseudo() {
     }
 
     @Test
-    @Ignore
+    @Ignore // #[ignore] in the reference, an empty placeholder there (tests/codec_read.rs)
     fun readHeadersWithPseudo() {
     }
 
     @Test
-    @Ignore
+    @Ignore // #[ignore] in the reference, an empty placeholder there (tests/codec_read.rs)
     fun readHeadersEmptyPayload() {
     }
 

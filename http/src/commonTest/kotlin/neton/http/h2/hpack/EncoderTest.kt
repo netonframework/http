@@ -401,6 +401,7 @@ class EncoderTest {
         assertEquals(Encoder.DEFAULT_MAX_ALLOWED_SIZE, encoder.table.maxSize)
     }
 
+    // #[ignore] in the reference (src/hpack/encoder.rs)
     @Ignore
     @Test
     fun testEvictedOverflow() {
