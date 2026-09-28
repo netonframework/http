@@ -295,7 +295,7 @@ class Http1Connection internal constructor(private val stream: IoStream, private
         val bodyLen: Long? = if (body.isEndStream) null else body.exactLength.let { if (it < 0) OutgoingBody.UNKNOWN else it }
         val status = response.status
         switched = config.upgrades && pendingUpgrade != null &&
-            (status.asU16() == 101 || conn.method == Method.CONNECT && status.isSuccess())
+            (status.asU16() == 101 || conn.method === Method.CONNECT && status.isSuccess())
         io.writeLock.withLock { conn.writeHead(response.parts, bodyLen) }
         conn.error?.let { e ->
             if (conn.isWriteClosed) { flushLocked(); throw e }

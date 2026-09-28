@@ -242,7 +242,7 @@ class ServerHeadParser(val config: H1Config = H1Config()) {
         var expectContinue = false
         var conLen: Long? = null
         var isCl = false; var isTe = false; var isTeChunked = false
-        var wantsUpgrade = method == Method.CONNECT
+        var wantsUpgrade = method === Method.CONNECT
         val headers = HeaderMap<HeaderValue>()
         if (slots.count > 0) headers.reserve(slots.count)
         val caseMap = if (config.preserveHeaderCase) HeaderCaseMap() else null
@@ -407,8 +407,8 @@ class ClientHeadParser(val config: H1Config = H1Config()) {
             in 100..199 -> return SKIP
             204, 304 -> return 0
             else -> {
-                if (method == Method.HEAD) return 0
-                if (method == Method.CONNECT && code in 200..299) { wantsUpgrade = true; return 0 }
+                if (method === Method.HEAD) return 0
+                if (method === Method.CONNECT && code in 200..299) { wantsUpgrade = true; return 0 }
             }
         }
         val headers = p.headers
@@ -521,10 +521,10 @@ enum class H1EncodeError { UnexpectedHeader, UnsupportedStatusCode }
 /** Encodes response heads (hyper `Server::encode` + `encode_headers`). */
 object ServerHeadEncoder {
     fun canChunked(method: Method?, status: StatusCode): Boolean =
-        status.asU16().let { c -> !(method == Method.HEAD || method == Method.CONNECT && c in 200..299 || c in 100..199) && c != 204 && c != 304 }
+        status.asU16().let { c -> !(method === Method.HEAD || method === Method.CONNECT && c in 200..299 || c in 100..199) && c != 204 && c != 304 }
 
     fun canHaveContentLength(method: Method?, status: StatusCode): Boolean =
-        status.asU16().let { c -> !(c in 100..199 || method == Method.CONNECT && c in 200..299) && c != 204 && c != 304 }
+        status.asU16().let { c -> !(c in 100..199 || method === Method.CONNECT && c in 200..299) && c != 204 && c != 304 }
 
     /**
      * Appends the status line and headers of [parts] to [dst]. [body]: null (no body), [OutgoingBody.UNKNOWN] or a
@@ -546,7 +546,7 @@ object ServerHeadEncoder {
         val status0 = parts.status
         when {
             status0.asU16() == 101 -> isLast = true
-            reqMethod == Method.CONNECT && status0.isSuccess() -> { wroteLen = true; isLast = true }   // no CL / TE (RFC 7231)
+            reqMethod === Method.CONNECT && status0.isSuccess() -> { wroteLen = true; isLast = true }   // no CL / TE (RFC 7231)
             status0.isInformational() -> {
                 // hyper: a service cannot return a 1xx response; a default 500 head goes out instead.
                 parts.status = StatusCode.INTERNAL_SERVER_ERROR; parts.version = Version.HTTP_11
@@ -614,7 +614,7 @@ object ServerHeadEncoder {
                             return@forEach
                         }
                         // No body: the header only makes sense for HEAD (written as is) or when it says 0 (dropped).
-                        reqMethod != Method.HEAD -> return@forEach
+                        reqMethod !== Method.HEAD -> return@forEach
                     }
                     wroteLen = true
                 }
@@ -659,7 +659,7 @@ object ServerHeadEncoder {
                     if (parts.version == Version.HTTP_10 || !canChunked) kind = EncodePlan.CLOSE_DELIMITED
                     else { writeName(dst, HeaderName.TRANSFER_ENCODING, w); dst.writeBytes(COLON_CHUNKED_CRLF); kind = EncodePlan.CHUNKED }
                 body == null || body == 0L -> {
-                    if (canHaveContentLength(reqMethod, status) && reqMethod != Method.HEAD) {
+                    if (canHaveContentLength(reqMethod, status) && reqMethod !== Method.HEAD) {
                         writeName(dst, HeaderName.CONTENT_LENGTH, w); dst.writeBytes(COLON_ZERO_CRLF)
                     }
                     kind = EncodePlan.LENGTH; length = 0
@@ -733,7 +733,7 @@ object ClientHeadEncoder {
             return EncodePlan(EncodePlan.LENGTH, existingCl, null, false)
         } else if (body == OutgoingBody.UNKNOWN) {
             // GET, HEAD and CONNECT almost never have bodies: assume none rather than a chunked empty body.
-            if (parts.method == Method.GET || parts.method == Method.HEAD || parts.method == Method.CONNECT) {
+            if (parts.method === Method.GET || parts.method === Method.HEAD || parts.method === Method.CONNECT) {
                 return EncodePlan(EncodePlan.LENGTH, 0, null, false)
             }
             headers.insert(HeaderName.TRANSFER_ENCODING, HeaderValue.fromStatic("chunked"))

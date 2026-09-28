@@ -29,8 +29,10 @@ class Method private constructor(private val kind: Int, private val name: String
 
     override fun compareTo(other: Method): Int = name.compareTo(other.name)
 
+    // Standard methods exist only as the shared constants (the constructor is private and parsing returns them), so
+    // two of them are equal only when identical; names are compared for extension methods alone.
     override fun equals(other: Any?): Boolean =
-        this === other || (other is Method && kind == other.kind && name == other.name)
+        this === other || (other is Method && kind == K_EXTENSION && other.kind == K_EXTENSION && name == other.name)
 
     override fun hashCode(): Int = name.hashCode()
 
