@@ -485,6 +485,11 @@ class HyperH2ClientTest {
 
         val (client, conn) = Http2ClientConfig().handshake(clientIo)
         spawn { runCatching { conn.run() } }
+        // The test needs the server's SETTINGS (initial window 0) applied before the request goes out, or the body is
+        // sent under the default window (RFC 9113 §6.9.2) and nothing is left to cancel. tokio's duplex delivers them
+        // first; over TCP they may still be in flight, so wait: the client's max concurrent send streams leaves its
+        // initial 100 once they are applied (this server sets no limit).
+        while (conn.currentMaxSendStreams() == 100) delay(1)
 
         val req = Request.post("http://localhost/").body(FullBody(Bytes.copyOf(ByteArray(50) { 'x'.code.toByte() })) as Body)
         val res = withTimeoutOrNull(5) { client.sendRequest(req) }
