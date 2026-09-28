@@ -546,3 +546,54 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   的 12 个实现目录 382 个故事、40,374 个用例（469,664 个头部）解码并重新编码往返，另加 `raw-data` 32 个故事的往返。测试资源 58 MB 在
   `http/src/nativeTest/resources/hpack-test-case/`（附 NOTICE）。
 - 合计：macOS 498 个测试通过（1 个与参考一致地忽略），linuxX64 / mingwX64 编译通过。
+
+**第 2 步（续）：HTTP/1.1 连接层（2026-09-28）**
+- `Request` / `Response`（http 1.5.0，构建器首错语义）与 `Body` / `Frame` / `SizeHint`（`EmptyBody`、`FullBody`），9 个测试。消息头的 `HeaderMap` 与
+  `Extensions` 在首次使用时才创建（http crate 同样不为空头部分配）。
+- 消息体编解码（`BodyDecoder` / `BodyEncoder`，hyper `decode.rs` / `encode.rs`）：参考测试 17 + 10 全部移植（异步测试改为逐字节切分输入、带 / 不带
+  EOF），另加 20 个安全基线与接口测试。⚖️：chunk 大小行 1 KiB（与 16 KiB 扩展合计上限并存；参考的超限测试需放宽此项）、十六进制至多 16 位、trailer
+  默认 8 KiB、trailer 中单独的 LF 被拒绝、错误是粘滞的；长度参数为 `Long`（2^63 以上不可表示）。
+- 角色（`Role.kt`，hyper `role.rs`）：`ServerHeadParser` / `ClientHeadParser`（每连接复用槽位；完整头部复制一次，头部值与 URI 是这份复制的切片）、
+  `ServerHeadEncoder` / `ClientHeadEncoder`（长度矩阵、101 与 CONNECT 2xx、1xx → 500、HTTP/2 → 1.1、原因短语、Date、标题大小写与
+  `preserveHeaderCase` 的 `HeaderCaseMap`）、`isCompleteFast`。`role.rs` 的 25 个测试全部移植（TE+CL 两组以 `lenientTeWithCl` 按参考断言，另测默认
+  拒绝；`test_parse_accepts_lf_crlf_terminator` 以 `allowBareLf` 按参考断言，另测默认拒绝），另加 11 个（请求行 / 头部段上限、CL 范围、服务端标志、
+  1xx 与原因短语、编码矩阵、状态行、Date 格式、客户端 `set_length`）。
+  CL 超出 `Long` 但在 u64 内 → 431（参考在 u64 顶端报 431、其余接受），超出 u64 → 400。
+- 连接（`H1Io` / `H1Conn` / `Server.kt` / `Client.kt` / `Incoming` / `Upgraded` / `OnUpgrade` / `HttpError`，hyper `io.rs` / `conn.rs` / `dispatch.rs` /
+  `server/conn/http1.rs` / `client/conn/http1.rs`，按 §3.10 落地）：
+  - 服务与响应消息体在连接协程内联调用（`InlineCall`：一次"poll"——立即完成则不另起协程）；只有当它们挂起时，才像 hyper 那样先写出已缓冲的
+    字节，并在读侧等待 EOF（`mid_message_detect_eof`）：客户端关闭则取消进行中的交换，连接以 `IncompleteMessage` 结束（`halfClose` 关闭此行为）。
+  - 请求体由读取者直接驱动本连接的解码器，不经通道；服务返回后未读完的请求体按 hyper 只取已缓冲的一步，未结束则关闭读端（hyper 在消息体被丢弃时
+    做这件事，Kotlin 没有析构，改在交换结束时）。
+  - 写：queue（默认，头部与分块帧在小缓冲中、数据按引用排队，一次 writev 至多 16 个数据块）与 flatten 两种策略，`pipelineFlush` 合并流水线响应。
+  - ⚖️ 超时：`headerReadTimeoutMillis`（10 s，自首字节起）与 `keepAliveIdleTimeoutMillis`（60 s，等待下一个请求首字节，超时为安静关闭）用流的
+    `ReadTimeout` 能力；流不具备时构造即拒绝（内存流须设为 0）。⚖️ `maxRequestBodySize`（10 MiB）：声明的长度超限直接回 413 并关闭，chunked 超限
+    时读取者得到错误、服务失败后回 413。
+  - 升级：`OnUpgrade` 只在响应确实切换协议（101 或 CONNECT 2xx）时交出 `Upgraded`（先回放读缓冲剩余字节）；未切换 → `NoUpgrade`，未开启
+    `upgrades` → `ManualUpgrade`（⚖️ hyper 在连接最终结束时仍会交出流，Kotlin 没有析构，无人领取的流会泄漏）。
+  - 客户端：`SendRequest`（hyper 的就绪规则：首个请求可在连接运行前发出，之后须 `ready()`）、请求体在子协程中写出、同时读取响应、空闲时读侧
+    监视（`require_empty_read`）、1xx 经 `OnInformational` 报告、升级。
+  - 测试：`ServerTest` 15、`ClientTest` 5、`WriteGateTest` 2；hyper `tests/server.rs` / `client.rs` / `integration.rs` 的移植另行进行（见下一条记录）。
+- 性能（153，hello world，单反应器绑定一核，wrk 2 线程）：首次对照 50 连接 neton 37.6k req/s、p99 7.7 ms，hyper 1.11.1 约 120k req/s、p99 0.5 ms
+  （每请求 CPU 约 3 倍）。以 cachegrind 每请求指令数（hyper 6,549 Ir）逐项定位并修正：
+  | 修正 | Ir / 请求 | 分配 / 请求 |
+  |---|---|---|
+  | 起点 | 98,252 | — |
+  | 构建器每次构建都预先创建"已使用"异常（捕获栈） | 30,718 | 42 |
+  | 头部以字节常量、头部名字节、缓存的 Date 字节与十进制写出，不经 String；解析出的头部表一次定容；访问器去掉属性引用 | 22,531 | 42 |
+  | 每连接复用编码器 / 解码器 / 编码计划；排队的切片复用包装缓冲（neton-io `Buffer.borrow`）；flush 路径少一层挂起；缺席头部的快速判断 | 21,463 | 35 |
+  | 单线程写闸门代替 kotlinx `Mutex`；消息头部表与扩展延迟创建 | 19,879 | 32 |
+  仍为 hyper 的约 3 倍，继续：剩余成本主要是分配与 GC（清零、分配、清扫、标记约 5k）与每请求约 10 层挂起函数的续体。
+
+**HTTP/2：帧与编解码器（2026-09-28）**
+- `neton.http.h2.frame`（DATA、HEADERS、PRIORITY、RST_STREAM、SETTINGS、PUSH_PROMISE、PING、GOAWAY、WINDOW_UPDATE、CONTINUATION，h2 的解析
+  规则与错误映射、伪头部与头部块校验、头部列表大小）与 `neton.http.h2.codec`（`FramedRead` 基于 `Buffer`、`FramedWrite` 带 DATA 链接与
+  CONTINUATION 拆分、`Codec`，无 I/O），`proto/ProtoError`。
+- 测试 121 个：`frame/mod.rs` 1、`data.rs` 4、`headers.rs` 6、`codec_read.rs` 14（与 h2 一样忽略 4 个空测试）、`codec_write.rs` 4，另加 §4.1 规则测试 92
+  （帧 51、头部块 19、编解码 22）。合计 macOS 733 个测试（5 个与参考一致地忽略），linuxX64 / mingwX64 编译通过。
+- ⚖️：拆分的头部块中出现畸形头部时，等到 END_HEADERS 再重置流并照常解完整个块（h2 在 HEADERS 帧处即重置，之后的块不再解码，HPACK 表失步，
+  下一个 CONTINUATION 变成 GOAWAY）；跨片段边界的违规被带到下一片段（h2 会遗忘，使畸形头部被静默丢弃）；写出链接的判断统一用未写出部分；
+  编解码器不做 I/O（`FramedRead` 用调用方的 `Buffer`、`decodeEof` 表示输入结束，`FramedWrite` 由连接经 `advance` / `unsetFrame` 驱动）。
+- Kotlin 形态（行为不变）：`Head` 打包进一个 Long（解析帧头不分配）、DATA 负载为 `Bytes` 切片、PING 负载为 Long、设置值为 `Long?`、伪头部值为
+  String、`Headers.encode` 不消耗帧、错误为异常（`FrameException`、`ProtoError`、`StreamIdOverflow`）。⛔ 发送 PRIORITY 抛 `NotImplementedError`
+  （同 h2 的 `unimplemented!()`）。
