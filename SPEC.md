@@ -652,3 +652,5 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   驱动 / 读者两个协程；句柄须在连接的线程上使用（§4.4 要求的跨线程投递尚未实现）；可选 `settingsAckTimeout`（§4.3，默认关闭同参考）；错误类型
   名 `H2Error`；h2 中 u32 的选项为 `Int`；`poll_*` 成为挂起函数（`awaitCapacity`、`awaitReset`、`informational`、`pushPromise`、`awaitPong`）。
 - 未完成：hyper 的 h2 接线（hyper 的默认值、BDP 自适应窗口、keep-alive ping、头部剥离、CONNECT 隧道）与 h2spec、性能对照。
+- 合入 HTTP/2 后的 Linux 验收（153）：1114 个测试（14 个与参考一致地忽略）在 epoll 与 io_uring 上全过。
+- 请求体数据帧不超过 16 KiB 时复制出读缓冲（切片会使连接的下一次读换新数组：带体请求每个一次整缓冲分配；64 字节 POST 实测每请求分配 28.1 → 27.1，且去掉了 8 KiB 数组）。
