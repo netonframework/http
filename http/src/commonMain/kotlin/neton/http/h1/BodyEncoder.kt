@@ -24,13 +24,21 @@ import neton.io.bytes.Bytes
  * Bytes beyond the declared length are silently dropped (`encode.rs:145`).
  */
 class BodyEncoder private constructor(
-    private val kind: Int,
+    private var kind: Int,
     private var remainingLen: Long,
     /** `Kind::Chunked(Option<Vec<HeaderName>>)`: the fields announced by `Trailer`. */
-    private val trailerFields: List<HeaderName>?,
+    private var trailerFields: List<HeaderName>?,
     /** `is_last`: the connection closes after this message. */
     var isLast: Boolean,
 ) {
+    /** Makes this encoder the one [plan] describes, so a connection keeps one encoder for all its messages. */
+    internal fun reset(plan: EncodePlan) {
+        kind = when (plan.kind) { EncodePlan.CHUNKED -> KIND_CHUNKED; EncodePlan.CLOSE_DELIMITED -> KIND_CLOSE; else -> KIND_LENGTH }
+        remainingLen = if (kind == KIND_LENGTH) plan.length else 0
+        trailerFields = if (kind == KIND_CHUNKED) plan.allowedTrailers else null
+        isLast = plan.isLast
+    }
+
     /** Whether a `Content-Length` body has been fully written (`is_eof`). */
     val isEof: Boolean get() = kind == KIND_LENGTH && remainingLen == 0L
 

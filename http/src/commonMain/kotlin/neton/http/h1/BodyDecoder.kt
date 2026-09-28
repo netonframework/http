@@ -154,13 +154,38 @@ enum class DecodeResult {
  * rejected. An error is sticky.
  */
 class BodyDecoder private constructor(
-    private val kind: Int,
+    private var kind: Int,
     /** Length: bytes left. */
     private var remaining: Long,
-    private val maxHeaders: Int,
-    private val maxTrailerSize: Int,
-    private val maxSizeLine: Int,
+    private var maxHeaders: Int,
+    private var maxTrailerSize: Int,
+    private var maxSizeLine: Int,
 ) {
+    /**
+     * Makes this decoder a fresh one of the given kind (what [length], [chunked] and [eof] create), so a connection
+     * keeps one decoder for all its messages. [length]: [BodyLength] of the message (> 0, chunked or close-delimited).
+     */
+    internal fun reset(length: Long, maxHeaders: Int) {
+        when (length) {
+            BodyLength.CHUNKED -> { kind = KIND_CHUNKED; remaining = 0; this.maxHeaders = maxHeaders; maxTrailerSize = DEFAULT_MAX_TRAILER_SIZE; maxSizeLine = DEFAULT_MAX_CHUNK_SIZE_LINE }
+            BodyLength.CLOSE_DELIMITED -> { kind = KIND_EOF; remaining = 0; this.maxHeaders = 0; maxTrailerSize = 0; maxSizeLine = 0 }
+            else -> { require(length >= 0); kind = KIND_LENGTH; remaining = length; this.maxHeaders = 0; maxTrailerSize = 0; maxSizeLine = 0 }
+        }
+        state = ChunkedState.START
+        chunkLen = 0uL
+        extensionsCnt = 0
+        trailersBuf = null
+        trailersLen = 0
+        trailersCnt = 0
+        sizeLineLen = 0
+        sizeDigits = 0
+        sawEof = false
+        data = Bytes.EMPTY
+        trailers = null
+        error = null
+        wanted = 0
+    }
+
     // ---- chunked state (`Kind::Chunked`) ----
     internal var state: ChunkedState = ChunkedState.START
         private set

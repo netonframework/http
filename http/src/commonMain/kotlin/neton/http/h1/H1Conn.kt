@@ -25,6 +25,10 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
     var keepAlive = KA.BUSY; private set
     private var decoder: BodyDecoder? = null
     private var encoder: BodyEncoder? = null
+    // One of each per connection, reset per message (hyper's are values; here they would be objects per message).
+    private val plan = EncodePlan()
+    private val reusableEncoder = BodyEncoder.length(0)
+    private val reusableDecoder = BodyDecoder.length(0)
 
     /** The request method (hyper `state.method`): parsed by the server, sent by the client. */
     var method: Method? = null
@@ -67,8 +71,9 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
     val hasInitialReadWriteState: Boolean
         get() = reading == Reading.INIT && writing == Writing.INIT && io.readBuf.readableBytes == 0
 
-    /** Result of [readHead] for the server. */
-    class RequestHead(val parts: RequestParts, val bodyLength: Long, val wantsUpgrade: Boolean, val expectContinue: Boolean)
+    // The last request head's facts (the server's [readHead] returns only its parts).
+    var headBodyLength = 0L; private set
+    var headWantsUpgrade = false; private set
 
     /** Result of [readHead] for the client. */
     class ResponseHead(val parts: ResponseParts, val bodyLength: Long, val wantsUpgrade: Boolean, val informational: List<ResponseParts>)
@@ -140,7 +145,9 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
         method = parts.method
         afterHead(p.keepAlive, parts.version, p.bodyLength, p.expectContinue)
         allowTrailerFields = H1Headers.teIsTrailers(parts.headers)
-        return RequestHead(parts, p.bodyLength, p.wantsUpgrade, p.expectContinue)
+        headBodyLength = p.bodyLength
+        headWantsUpgrade = p.wantsUpgrade
+        return parts
     }
 
     private fun parseResponse(arr: ByteArray, off: Int, len: Int): Any? {
@@ -172,11 +179,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
             decoder = null
             if (!isServer) tryKeepAlive()
         } else {
-            decoder = when (length) {
-                BodyLength.CHUNKED -> BodyDecoder.chunked(maxHeaders = config.maxHeaders)
-                BodyLength.CLOSE_DELIMITED -> BodyDecoder.eof()
-                else -> BodyDecoder.length(length)
-            }
+            decoder = reusableDecoder.also { it.reset(length, config.maxHeaders) }
             reading = if (expectContinue && msgVersion != Version.HTTP_10 && msgVersion != Version.HTTP_09) Reading.CONTINUE else Reading.BODY
         }
     }
@@ -364,8 +367,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
     /** hyper `write_head` for a response; an encoding failure sets [error] and closes the write side. */
     fun writeHead(parts: ResponseParts, body: Long?) {
         enforceVersion(parts)
-        val plan = ServerHeadEncoder.encode(parts, body, method, wantsKeepAlive, config, dateHeader, io.headersBuf())
-        applyPlan(plan)
+        applyPlan(ServerHeadEncoder.encodeInto(parts, body, method, wantsKeepAlive, config, dateHeader, io.headersBuf(), plan))
     }
 
     fun writeHead(parts: RequestParts, body: Long?) {
@@ -386,7 +388,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
             keepAlive = KA.DISABLED
             return
         }
-        val enc = plan.encoder()
+        val enc = reusableEncoder.also { it.reset(plan) }
         encoder = enc
         writing = when {
             !enc.isEof -> Writing.BODY
@@ -483,7 +485,19 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
         flushLocked()
     }
 
-    suspend fun flushLocked() = io.writeLock.withLock { flush() }
+    /** [flush] holding the write lock; one suspending layer on the per-response path. */
+    suspend fun flushLocked() {
+        io.writeLock.lock()
+        try {
+            io.flush()
+        } catch (e: IoException) {
+            close()
+            throw HttpError(HttpError.Kind.BodyWrite, e)
+        } finally {
+            io.writeLock.unlock()
+        }
+        tryKeepAlive()
+    }
 
     /** hyper `poll_flush` + `try_keep_alive`. */
     suspend fun flush() {

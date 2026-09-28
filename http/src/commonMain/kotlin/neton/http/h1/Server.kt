@@ -173,21 +173,22 @@ class Http1Connection internal constructor(private val stream: IoStream, private
             }
             if (!conn.canReadHead) return
             waitingForHead = true
-            val head = try {
-                conn.readHead(config.keepAliveIdleTimeoutMillis, config.headerReadTimeoutMillis, first) as H1Conn.RequestHead?
+            val parts = try {
+                conn.readHead(config.keepAliveIdleTimeoutMillis, config.headerReadTimeoutMillis, first) as neton.http.RequestParts?
             } finally { waitingForHead = false }
             first = false
-            if (head == null) return
-            if (config.maxRequestBodySize > 0 && head.bodyLength > config.maxRequestBodySize) {
+            if (parts == null) return
+            val bodyLength = conn.headBodyLength
+            if (config.maxRequestBodySize > 0 && bodyLength > config.maxRequestBodySize) {
                 rejectBodyTooLarge()
                 return
             }
-            val body = if (head.bodyLength == 0L) Incoming.EMPTY else Incoming(conn, conn.bodyGeneration, head.bodyLength)
-            if (head.wantsUpgrade) {
+            val body = if (bodyLength == 0L) Incoming.EMPTY else Incoming(conn, conn.bodyGeneration, bodyLength)
+            if (conn.headWantsUpgrade) {
                 pendingUpgrade?.fail(HttpError(HttpError.Kind.Canceled))
-                pendingUpgrade = OnUpgrade().also { head.parts.extensions.insert(it) }
+                pendingUpgrade = OnUpgrade().also { parts.extensions.insert(it) }
             }
-            exchange(Request(head.parts, body))
+            exchange(Request(parts, body))
             if (conn.canReadBody) conn.drainOrCloseRead()
             conn.tryKeepAlive()
             if (switched) return

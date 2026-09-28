@@ -133,12 +133,14 @@ internal object H1Headers {
 
     /** A `TE` header lists `trailers` (hyper `te_is_trailers`). */
     fun teIsTrailers(headers: HeaderMap<HeaderValue>): Boolean {
+        if (!headers.containsKey(HeaderName.TE)) return false
         for (v in headers.getAll(HeaderName.TE)) if (listHas(v, "trailers")) return true
         return false
     }
 
     /** Any `Connection` line carries `close` (hyper `connection_any_close`). */
     fun connectionAnyClose(headers: HeaderMap<HeaderValue>): Boolean {
+        if (!headers.containsKey(HeaderName.CONNECTION)) return false
         for (v in headers.getAll(HeaderName.CONNECTION)) if (connectionClose(v)) return true
         return false
     }
@@ -476,22 +478,33 @@ class ClientHeadParser(val config: H1Config = H1Config()) {
 /** How the body of an outgoing message is framed (hyper `Encoder`), decided while encoding its head. */
 class EncodePlan(
     /** [LENGTH], [CHUNKED] or [CLOSE_DELIMITED]. */
-    val kind: Int,
+    kind: Int = LENGTH,
     /** For [LENGTH]: the byte count. */
-    val length: Long,
+    length: Long = 0,
     /** For [CHUNKED]: the trailer fields the `Trailer` header allows (null = none declared). */
-    val allowedTrailers: List<HeaderName>?,
+    allowedTrailers: List<HeaderName>? = null,
     /** Close the connection after this message (hyper `is_last`). */
-    val isLast: Boolean,
+    isLast: Boolean = false,
     /**
      * Set when encoding failed. [H1EncodeError.UnexpectedHeader]: nothing was written. [H1EncodeError.UnsupportedStatusCode]:
      * a 500 head was written in place of the 1xx response, and the connection closes after it (hyper).
      */
-    val error: H1EncodeError? = null,
+    error: H1EncodeError? = null,
 ) {
+    var kind = kind; internal set
+    var length = length; internal set
+    var allowedTrailers = allowedTrailers; internal set
+    var isLast = isLast; internal set
+    var error = error; internal set
+
+    internal fun set(kind: Int, length: Long, allowedTrailers: List<HeaderName>?, isLast: Boolean, error: H1EncodeError?): EncodePlan {
+        this.kind = kind; this.length = length; this.allowedTrailers = allowedTrailers; this.isLast = isLast; this.error = error
+        return this
+    }
+
     /** The body encoder this plan describes. */
     fun encoder(): BodyEncoder = when (kind) {
-        CHUNKED -> BodyEncoder.chunked().let { if (allowedTrailers != null) it.withTrailerFields(allowedTrailers) else it }
+        CHUNKED -> BodyEncoder.chunked().let { t -> allowedTrailers?.let { t.withTrailerFields(it) } ?: t }
         CLOSE_DELIMITED -> BodyEncoder.closeDelimited()
         else -> BodyEncoder.length(length)
     }.also { it.setLast(isLast) }
@@ -521,6 +534,12 @@ object ServerHeadEncoder {
      */
     fun encode(
         parts: ResponseParts, body: Long?, reqMethod: Method?, keepAlive: Boolean, config: H1Config, dateHeader: Boolean, dst: Buffer,
+    ): EncodePlan = encodeInto(parts, body, reqMethod, keepAlive, config, dateHeader, dst, EncodePlan())
+
+    /** [encode] filling [into] (a connection reuses one plan). */
+    internal fun encodeInto(
+        parts: ResponseParts, body: Long?, reqMethod: Method?, keepAlive: Boolean, config: H1Config, dateHeader: Boolean, dst: Buffer,
+        into: EncodePlan,
     ): EncodePlan {
         var wroteLen = false
         var isLast: Boolean
@@ -632,7 +651,7 @@ object ServerHeadEncoder {
         }
         if (failed) {
             rewind(dst, origLen)
-            return EncodePlan(EncodePlan.LENGTH, 0, null, true, H1EncodeError.UnexpectedHeader)
+            return into.set(EncodePlan.LENGTH, 0, null, true, H1EncodeError.UnexpectedHeader)
         }
         if (isNameWritten) dst.writeBytes(if (mustWriteChunked) COMMA_CHUNKED_CRLF else CRLF_BYTES)
 
@@ -658,7 +677,7 @@ object ServerHeadEncoder {
         if (!wroteDate && dateHeader) {
             writeName(dst, HeaderName.DATE, w); dst.writeBytes(COLON_SP); dst.writeBytes(HttpDate.nowBytes()); dst.writeBytes(CRLF_CRLF)
         } else dst.writeBytes(CRLF_BYTES)
-        return EncodePlan(kind, length, if (kind == EncodePlan.CHUNKED) allowed else null, isLast, ret)
+        return into.set(kind, length, if (kind == EncodePlan.CHUNKED) allowed else null, isLast, ret)
     }
 
     /** Drops what this call appended (hyper `dst.truncate(orig_len)`); a cold path. */
