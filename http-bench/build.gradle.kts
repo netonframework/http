@@ -5,6 +5,8 @@ kotlin {
     listOf(linuxX64(), linuxArm64(), macosArm64()).forEach { target ->
         target.binaries {
             executable("helloServer") { entryPoint = "neton.http.bench.main" }
+            // Same code with debug info, for line-level profiles (cachegrind / callgrind).
+            executable("helloServerProfile") { entryPoint = "neton.http.bench.main"; freeCompilerArgs += "-g" }
         }
     }
     sourceSets {

@@ -19,9 +19,9 @@ import neton.io.core.TimeoutException
  * polls. The rules (state transitions, keep-alive, version enforcement, `100 Continue`, errors) are hyper's.
  */
 internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config) : neton.http.Incoming.Source {
-    var reading = Reading.INIT; private set
-    var writing = Writing.INIT; private set
-    var keepAlive = KA.BUSY; private set
+    var reading: Int = Reading.INIT; private set
+    var writing: Int = Writing.INIT; private set
+    var keepAlive: Int = KA.BUSY; private set
     private var decoder: BodyDecoder? = null
     private var encoder: BodyEncoder? = null
     // One of each per connection, reset per message (hyper's are values; here they would be objects per message).
@@ -53,9 +53,10 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
     /** Up to this many buffered bytes an incomplete head cannot break a ⚖️ limit the parser checks on partial heads. */
     private val partialSkipLimit = if (isServer) minOf(config.maxRequestLineSize, config.maxHeaderSectionSize) else config.maxHeaderSectionSize
 
-    enum class Reading { INIT, CONTINUE, BODY, KEEP_ALIVE, CLOSED }
-    enum class Writing { INIT, BODY, KEEP_ALIVE, CLOSED }
-    enum class KA { IDLE, BUSY, DISABLED }
+    // The states are Int constants: reading an enum entry goes through its class initialisation check every time.
+    object Reading { const val INIT = 0; const val CONTINUE = 1; const val BODY = 2; const val KEEP_ALIVE = 3; const val CLOSED = 4 }
+    object Writing { const val INIT = 0; const val BODY = 1; const val KEEP_ALIVE = 2; const val CLOSED = 3 }
+    object KA { const val IDLE = 0; const val BUSY = 1; const val DISABLED = 2 }
 
     // ---- reading ---------------------------------------------------------------------------------------------
 
