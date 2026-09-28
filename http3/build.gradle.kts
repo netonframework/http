@@ -1,8 +1,9 @@
 plugins { kotlin("multiplatform") }
 
 // com.netonstream:http3 (SPEC §1, §5): the targets com.netonstream:http and com.netonstream:quic both provide (quic,
-// through openssl, has no 32-bit Android). The protocol core (frames, QPACK, stream state machines) depends on
-// com.netonstream:http only; the connection to com.netonstream:quic is added with the QUIC adapter.
+// through openssl, has no 32-bit Android). The protocol core (frames, QPACK, stream state machines, the connection layer
+// on the thin QUIC interface) is in commonMain and depends on com.netonstream:http only; the adapter onto
+// com.netonstream:quic, whose driver is native, is in nativeMain.
 kotlin {
     linuxX64(); linuxArm64()
     macosArm64(); macosX64()
@@ -12,6 +13,10 @@ kotlin {
 
     sourceSets {
         commonMain.dependencies { api(project(":http")) }
+        nativeMain.dependencies { api("com.netonstream:quic:0.1.0-SNAPSHOT") }
         commonTest.dependencies { implementation(kotlin("test")) }
+        // The TLS test double (MockTls) for the end-to-end tests over neton.quic (SPEC §5 layer 3). Test-only: no
+        // production source set may depend on quic-testkit.
+        nativeTest.dependencies { implementation("com.netonstream:quic-testkit:0.1.0-SNAPSHOT") }
     }
 }

@@ -5,7 +5,8 @@ import neton.http.h3.proto.StreamId
 import neton.io.bytes.Bytes
 
 // The thin QUIC interface HTTP/3 runs on (`h3::quic`, `src/quic.rs`; SPEC §5: "本库直接使用 neton.quic 的连接与流，另保留
-// 一层薄接口，以便测试时替换"). `com.netonstream:quic` implements it directly (phase C); tests use an in-memory double.
+// 一层薄接口，以便测试时替换"). `com.netonstream:quic` implements it in nativeMain (`NetonQuic.kt`: [QuicConnection], the role
+// of h3-quinn); layer-2 tests use an in-memory double.
 //
 // ⚖️ Kotlin shape: the reference's `poll_*` trait methods are suspending functions, and its `Result`s are exceptions:
 // a QUIC connection that is gone is a [ConnectionErrorIncoming] (thrown by `accept*`), a stream operation that fails is a
@@ -14,7 +15,7 @@ import neton.io.bytes.Bytes
 // [SendStream.write]. One coroutine at a time may read a [RecvStream] and one may write a [SendStream]; the two halves
 // of a bidirectional stream may be used concurrently.
 //
-// Mapping onto neton.quic (for phase C): `Connection.openUni/openBi/acceptUni/acceptBi` (a `Pair<SendStream,
+// Mapping onto neton.quic (`NetonQuic.kt`): `Connection.openUni/openBi/acceptUni/acceptBi` (a `Pair<SendStream,
 // RecvStream>` is one [BidiStream]); `SendStream.writeChunk` / `finish` / `reset` / `stopped`; `RecvStream.readChunk`
 // (the chunk's bytes; `null` at the end) / `stop`; `Connection.close(code, reason)`. neton.quic's `ConnectionError`
 // maps to [ConnectionErrorIncoming] as h3-quinn's `convert_connection_error` does (ApplicationClosed →
