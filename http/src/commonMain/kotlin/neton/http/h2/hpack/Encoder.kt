@@ -152,6 +152,12 @@ class Encoder(maxSize: Int = DEFAULT_MAX_ALLOWED_SIZE, capacity: Int = 0) {
     fun encodeField(name: HeaderName, value: HeaderValue, dst: Buffer) = encodeNamed(K_FIELD, name, value, null, dst)
 
     /**
+     * Encodes a pseudo-header without a [Header] object (one is only created if it enters the table): [kind] is one
+     * of the `K_*` pseudo kinds, [value] a [HttpMethod], [StatusCode] or [String] as in the corresponding variant.
+     */
+    internal fun encodePseudo(kind: Int, value: Any, dst: Buffer) = encodeNamed(kind, null, value, null, dst)
+
+    /**
      * Encodes another value for the name of the previous named header of this block (`encode_header_without_name`).
      *
      * @throws IllegalStateException if there is no previous named header in this block.
