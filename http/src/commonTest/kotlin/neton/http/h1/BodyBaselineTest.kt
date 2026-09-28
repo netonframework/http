@@ -233,14 +233,24 @@ class BodyBaselineTest {
 
     @Test
     fun chunkDataIsZeroCopySlice() {
-        val d = BodyDecoder.chunked()
+        // Small chunks are copied (a slice would make the connection's read buffer move to a fresh array).
+        val small = BodyDecoder.chunked()
         val buf = bufferOf("5\r\nhello\r\n")
         val arr = buf.backingArray()
-        assertEquals(DecodeResult.DATA, d.decode(buf, false))
-        arr[3] = 'j'.code.toByte() // the slice shares the buffer's array
-        assertEquals("jello", d.data.decodeToString())
-        assertEquals(DecodeResult.NEED_MORE, d.decode(buf, false))
-        assertEquals(1L, d.wanted)
+        assertEquals(DecodeResult.DATA, small.decode(buf, false))
+        arr[3] = 'j'.code.toByte()
+        assertEquals("hello", small.data.decodeToString())
+        // Large chunks stay zero-copy slices of the buffer.
+        val n = DATA_COPY_LIMIT + 1
+        val big = BodyDecoder.chunked()
+        val buf2 = bufferOf(n.toString(16) + "\r\n" + "a".repeat(n) + "\r\n")
+        val arr2 = buf2.backingArray()
+        val start = buf2.readerIndex() + n.toString(16).length + 2
+        assertEquals(DecodeResult.DATA, big.decode(buf2, false))
+        arr2[start] = 'j'.code.toByte()
+        assertEquals('j'.code.toByte(), big.data[0])
+        assertEquals(DecodeResult.NEED_MORE, big.decode(buf2, false))
+        assertEquals(1L, big.wanted)
     }
 
     // ---- encoder ----

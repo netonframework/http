@@ -268,7 +268,7 @@ class BodyDecoder private constructor(
             return DecodeResult.NEED_MORE
         }
         val n = if (rem < avail) rem.toInt() else avail
-        data = buf.readSlice(n)
+        data = takeData(buf, n)
         remaining = rem - n
         return DecodeResult.DATA
     }
@@ -285,7 +285,7 @@ class BodyDecoder private constructor(
             return DecodeResult.NEED_MORE
         }
         // 8192: about two packets (`decode.rs:228`).
-        data = buf.readSlice(if (avail < EOF_READ_SIZE) avail else EOF_READ_SIZE)
+        data = takeData(buf, if (avail < EOF_READ_SIZE) avail else EOF_READ_SIZE)
         return DecodeResult.DATA
     }
 
@@ -330,7 +330,7 @@ class BodyDecoder private constructor(
                     return DecodeResult.NEED_MORE
                 }
                 val n = if (rem < avail.toULong()) rem.toInt() else avail
-                data = buf.readSlice(n)
+                data = takeData(buf, n)
                 chunkLen = rem - n.toULong()
                 if (chunkLen == 0uL) state = ChunkedState.BODY_CR
                 return DecodeResult.DATA
@@ -588,3 +588,20 @@ private fun hexValue(b: Int): Int = when (b) {
     in 'A'.code..'F'.code -> b + 10 - 'A'.code
     else -> -1
 }
+
+/** Data frames up to this size are copied out of the read buffer; larger ones are zero-copy slices of it. */
+internal const val DATA_COPY_LIMIT = 16 * 1024
+
+/**
+ * A data frame from the read buffer. A slice makes the buffer share its array, so the connection's next read moves to
+ * a fresh array (the pooled one is not returned): an allocation of the whole buffer per request with a body. Small
+ * frames are copied into a right-sized array instead; large ones stay zero-copy (hyper hands out `Bytes` slices).
+ */
+internal fun takeData(buf: Buffer, n: Int): Bytes {
+    if (n > DATA_COPY_LIMIT) return buf.readSlice(n)
+    val at = buf.readerIndex()
+    val out = Bytes.copyOf(buf.backingArray(), at, at + n)
+    buf.skip(n)
+    return out
+}
+
