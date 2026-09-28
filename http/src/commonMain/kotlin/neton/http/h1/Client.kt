@@ -1,12 +1,9 @@
 package neton.http.h1
 
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.selects.select
 import neton.http.Body
 import neton.http.Frame
 import neton.http.HttpError
@@ -89,20 +86,25 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
     private val frameCall = InlineCall<Body, Frame?>(Body::nextFrame)
     private val noop: () -> Unit = {}
 
-    private class Pending(val request: Request<out Body>, val response: CompletableDeferred<Response<Incoming>>)
+    // The handoffs between the caller, the connection and its reader are reusable signals, not a CompletableDeferred
+    // or a launched coroutine per request: on Kotlin/Native their Job machinery cost more than the exchange itself.
+    // Everything runs on the connection's reactor thread; one caller at a time (hyper's `SendRequest` is `&mut`).
+    private class Pending(val request: Request<out Body>)
 
     private var pending: Pending? = null
-    private var wake: CompletableDeferred<Unit>? = null
+    private val response = Slot<Response<Incoming>>()
+    private val wake = Signal()
     private var wanting = false
     private var bufferedOnce = false
-    private var readyWaiters: CompletableDeferred<Unit>? = null
+    private val readySignal = Signal()
     private var closedError: HttpError? = null
     private var closed = false
-    private var bodyDone: CompletableDeferred<Unit>? = null
+    private val bodyDone = Signal()
+    private var awaitingBody = false
 
     init {
         io.queueStrategy = config.writev ?: true
-        conn.onBodyDone = { bodyDone?.complete(Unit) }
+        conn.onBodyDone = { if (awaitingBody) bodyDone.raise() }
     }
 
     internal val isReady: Boolean get() = !closed && wanting && pending == null
@@ -112,7 +114,7 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         while (true) {
             if (closed) throw closedError ?: HttpError(HttpError.Kind.ChannelClosed)
             if (isReady) return
-            (readyWaiters ?: CompletableDeferred<Unit>().also { readyWaiters = it }).await()
+            readySignal.await()
         }
     }
 
@@ -121,11 +123,11 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
             throw HttpError(HttpError.Kind.Canceled, IllegalStateException("connection was not ready"))
         }
         bufferedOnce = true
-        val p = Pending(request, CompletableDeferred())
-        pending = p
+        response.reset()
+        pending = Pending(request)
         wanting = false
-        wake?.complete(Unit)
-        return p.response.await()
+        wake.raise()
+        return response.await()
     }
 
     /**
@@ -137,21 +139,21 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         frameCall.context = coroutineContext
         var upgraded = false
         var failure: Throwable? = null
+        val reader = launch(start = CoroutineStart.UNDISPATCHED) { readerLoop() }
         try {
             upgraded = loop()
         } catch (e: Throwable) {
             failure = e
             throw if (e is IoException) HttpError(HttpError.Kind.Io, e) else e
         } finally {
+            reader.cancel()
             closed = true
             // hyper `SenderDropGuard`: a response body still being read ends with IncompleteMessage, not a clean end.
             if (conn.canReadBody) conn.closeRead()
             closedError = (failure as? HttpError) ?: HttpError(HttpError.Kind.ChannelClosed)
-            pending?.response?.completeExceptionally(
-                if (failure is HttpError) failure else HttpError(HttpError.Kind.Canceled, failure),
-            )
+            if (pending != null) response.fail(if (failure is HttpError) failure else HttpError(HttpError.Kind.Canceled, failure))
             pending = null
-            readyWaiters?.complete(Unit)
+            readySignal.raise()
             if (!upgraded) stream.close()
         }
     }
@@ -168,31 +170,44 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         }
     }
 
-    private var idleRead: Job? = null
+    // The idle read (hyper `require_empty_read`): while waiting for a request the connection watches the read side,
+    // and that read is also the first read of the next response's head. One reader coroutine for the connection's
+    // life does it on request ([readRequested]), instead of a coroutine launched per idle period.
+    private val readRequested = Signal()
+    private val readDone = Signal()
+    private var idleReading = false
+    private var idleReadFinished = false
     private var idleReadResult = 0
     private var idleReadError: Throwable? = null
 
-    private suspend fun kotlinx.coroutines.CoroutineScope.awaitRequest(): Pending? {
+    private suspend fun readerLoop() {
+        while (true) {
+            readRequested.await()
+            try { idleReadResult = io.readFromIo() } catch (e: IoException) { idleReadError = e }
+            idleReading = false
+            idleReadFinished = true
+            readDone.raise()
+            wake.raise()
+        }
+    }
+
+    private suspend fun awaitRequest(): Pending? {
         while (true) {
             pending?.let { return it }
             if (io.readBuf.readableBytes > 0) throw HttpError(HttpError.Kind.UnexpectedMessage)
-            if (idleRead == null && !io.readEof) {
+            if (!idleReading && !idleReadFinished && !io.readEof) {
                 idleReadError = null
-                idleRead = launch(start = CoroutineStart.UNDISPATCHED) {
-                    try { idleReadResult = io.readFromIo() } catch (e: IoException) { idleReadError = e }
-                    wake?.complete(Unit)
-                }
+                idleReading = true
+                readDone.clear()
+                readRequested.raise()
             }
-            val w = CompletableDeferred<Unit>()
-            wake = w
+            wake.clear()
             wanting = true
-            readyWaiters?.let { readyWaiters = null; it.complete(Unit) }
-            if (pending == null && idleRead?.isCompleted != true) w.await()
-            wake = null
+            readySignal.raise()
+            if (pending == null && !idleReadFinished) wake.await()
             pending?.let { return it }
-            val r = idleRead
-            if (r != null && r.isCompleted) {
-                idleRead = null
+            if (idleReadFinished) {
+                idleReadFinished = false
                 idleReadError?.let { throw HttpError(HttpError.Kind.Io, it) }
                 if (idleReadResult == 0) return null                       // the server closed an idle connection
                 throw HttpError(HttpError.Kind.UnexpectedMessage)
@@ -208,7 +223,7 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         try {
             conn.pumpBody(body, frameCall, noop)
         } catch (e: HttpError) {
-            pending?.let { pending = null; it.response.completeExceptionally(e) }
+            if (pending != null) { pending = null; response.fail(e) }
             throw e
         }
     }
@@ -221,35 +236,41 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         val bodyLen: Long? = if (body.isEndStream) null else body.exactLength.let { if (it < 0) OutgoingBody.UNKNOWN else it }
         val onInformational = request.extensions.get<OnInformational>()
         io.writeLock.withLock { conn.writeHead(request.parts, bodyLen) }
-        conn.error?.let { e -> conn.error = null; p.response.completeExceptionally(e); pending = null; return true }
+        conn.error?.let { e -> conn.error = null; response.fail(e); pending = null; return true }
         val writer = if (conn.canWriteBody) launch(start = CoroutineStart.UNDISPATCHED) { writeBody(body) } else {
             io.writeLock.withLock { conn.flush() }
             null
         }
         // The response: the parked idle read (if any) is the first read of its head.
-        idleRead?.let { r -> r.join(); idleRead = null; idleReadError?.let { throw HttpError(HttpError.Kind.Io, it) } }
+        if (idleReading || idleReadFinished) {
+            while (!idleReadFinished) readDone.await()
+            idleReadFinished = false
+            idleReadError?.let { throw HttpError(HttpError.Kind.Io, it) }
+        }
         val head = try {
             conn.readHead(0, 0, false) as H1Conn.ResponseHead?
         } catch (e: HttpError) {
             writer?.cancel()
             pending = null
-            p.response.completeExceptionally(e)
+            response.fail(e)
             throw e
         }
         if (head == null) {
             val e = conn.error ?: HttpError(HttpError.Kind.IncompleteMessage)
             pending = null
-            p.response.completeExceptionally(e)
+            response.fail(e)
             throw e
         }
         if (onInformational != null) for (info in head.informational) onInformational.callback(info)
         val upgrade = if (head.wantsUpgrade) OnUpgrade().also { head.parts.extensions.insert(it) } else null
         val incoming = if (head.bodyLength == 0L) Incoming.EMPTY else Incoming(conn, conn.bodyGeneration, head.bodyLength)
-        val done = if (conn.canReadBody) CompletableDeferred<Unit>().also { bodyDone = it } else null
+        val waitBody = conn.canReadBody
+        if (waitBody) { bodyDone.clear(); awaitingBody = true }
         pending = null
-        p.response.complete(Response(head.parts, incoming))
-        done?.await()
-        bodyDone = null
+        response.complete(Response(head.parts, incoming))
+        if (waitBody) {
+            try { bodyDone.await() } finally { awaitingBody = false }
+        }
         writer?.join()
         if (upgrade != null) {
             if (!config.upgrades) {
