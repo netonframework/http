@@ -2,7 +2,7 @@
 
 > Kotlin/Native 的 HTTP 协议库：通用 HTTP 类型、HTTP/1.1、HTTP/2，以及建在 `quic` 之上的 HTTP/3。底层是 `com.netonstream:io`。
 > 仓库 `http`。
-> 状态：草案 v1（2026-09-27，按 GPT 评审修订：HTTP/3 头部的三种上限分开、不继承参考跳过的测试；待评审）。
+> 状态：草案 v1（2026-09-27，按 GPT 评审修订：HTTP/3 头部的三种上限分开、不继承参考跳过的测试；待评审）。实施进展见 §11。
 
 ## 0. 依据与范围
 
@@ -59,10 +59,10 @@ com.netonstream:io（IoStream / Framed / Buffer / Bytes / 反应器 / 准入 / �
 |---|---|
 | `Request` / `Response` / `Parts` / `Builder`（`H/src/request.rs`、`response.rs`） | builder 记住第一个错误，在 `body()` 时报出；常用方法的快捷方式 |
 | `HeaderMap`（`H/src/header/map.rs`） | 见下文单列 |
-| `HeaderName`（`name.rs`） | 长度 ≤ 65535，非空；只允许 tchar，大写折叠为小写；`fromLowercase` / `fromStatic` 拒绝大写；82 个标准头常量；按字符串查找时不分配内存（64 字节暂存） |
+| `HeaderName`（`name.rs`） | 长度 ≤ 65535，非空；只允许 tchar，大写折叠为小写；`fromLowercase` / `fromStatic` 拒绝大写（这两者照参考使用 HTTP/2 的字符表，因此接受 `"`；`fromBytes` / `fromStr` 拒绝）；81 个标准头常量（v1 误写为 82，以参考 `name.rs` 为准）；按字符串查找时不分配内存（64 字节暂存） |
 | `HeaderValue`（`value.rs:558-565`） | 字节规则 `b >= 32 && b != 127 \|\| b == '\t'`（允许 obs-text）；`fromStatic` 更严格（只允许 32..126 与 tab）；`toStr` 只在全为可见 ASCII 或 tab 时成功；`isSensitive` 标记（调试输出时隐藏）；可从整数构造 |
 | `Method`（`method.rs`） | 标准方法 + QUERY；扩展方法为 tchar、区分大小写；`isSafe` / `isIdempotent` |
-| `StatusCode`（`status.rs`） | 100..999；`fromBytes` 要求恰好 3 位数字且首位 ≥ 1；63 个标准原因短语；按类别判断 |
+| `StatusCode`（`status.rs`） | 100..999；`fromBytes` 要求恰好 3 位数字且首位 ≥ 1；62 个标准原因短语（v1 误写为 63，以参考 `status.rs` 为准）；按类别判断 |
 | `Uri`（`uri/*.rs`） | 总长 ≤ 65534，方案 ≤ 64；12 种错误；origin-form / absolute-form / authority-form / `*` 的分派；authority 的字符与冒号 / 方括号 / 端口规则；路径与查询的字节表；`#` 片段被截掉；方案与 authority 比较时不分大小写 |
 | `Version` | 0.9 / 1.0 / 1.1（默认）/ 2 / 3 |
 | `Extensions` | 按类型存放的表，惰性分配 |
@@ -493,3 +493,14 @@ com.netonstream:io（IoStream / Framed / Buffer / Bytes / 反应器 / 准入 / �
 5. HTTP/3：在 `quic` 首版之后。
 
 每一步单独验证、单独提交，结果记入本 SPEC。
+
+## 11. 实施记录
+
+**第 1 步：通用类型（2026-09-28，进行中）**
+- 已完成并合入：`Method` / `StatusCode` / `Version` / `Extensions`（`neton.http`）；`HeaderName` / `HeaderValue`（`neton.http.header`）；`Uri` 及其部件
+  （`neton.http.uri`）。参考中的测试（`#[test]`、`test_parse!` 用例与断言行为的文档示例）逐条移植，另加 SPEC 条目的测试；macOS 224/224，
+  linuxX64 / mingwX64 编译通过。
+- 与参考的差异均为 Kotlin 形态所迫并在 KDoc 中说明：与字符串的比较用 `eq` / `equalsIgnoreCase` / `contentEquals`（Kotlin 的 `==` 不能跨类型重载）；
+  Rust 的 `Builder` / `Parts` 在 uri 包中名为 `UriBuilder` / `UriParts`；Rust panic 之处抛异常。有意保留的参考行为：`Scheme` 大写与常量不等、端口可带
+  前导 `+`、`fromStatic` 的宽松检查等。
+- 进行中：`HeaderMap`（含 Green / Yellow / Red 防碰撞与 SipHash-1-3，随机密钥取自 neton-io `secureRandom`）；HTTP/1.1 头部解析器（httparse）。
