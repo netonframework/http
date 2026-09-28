@@ -25,6 +25,7 @@ import neton.http.h2.hpack.Decoder
 import neton.http.h2.proto.IoErrorKind
 import neton.http.h2.proto.ProtoError
 import neton.io.bytes.Buffer
+import neton.io.bytes.Bytes
 
 /** 16 MiB "sane default" taken from golang http2 (`DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE`). */
 const val DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE: Int = 16 shl 20
@@ -44,7 +45,9 @@ const val DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE: Int = 16 shl 20
  * - Errors are thrown as [ProtoError]: [ProtoError.Reset] for a stream error, [ProtoError.GoAway] for a connection
  *   error, exactly where the reference returns them.
  *
- * DATA payloads are zero-copy slices of the read buffer ([Buffer.readSlice]). Header block fragments are decoded
+ * DATA payloads up to [DATA_COPY_LIMIT] bytes are copied out of the read buffer into right-sized arrays; larger ones
+ * are zero-copy slices of it ([Buffer.readSlice]): a slice makes the buffer share its array, so the connection's next
+ * read would move to a fresh array of the buffer's whole capacity for every small frame. Header block fragments are decoded
  * straight from the read buffer; only the bytes of a representation split across frames are copied, into a buffer
  * owned by this reader and reused.
  *
@@ -138,7 +141,7 @@ class FramedRead(maxFrameSize: Int = DEFAULT_MAX_FRAME_SIZE) {
 
         if (kind == Kind.Data) {
             buf.skip(HEADER_LEN)
-            val payload = buf.readSlice(len)
+            val payload = takePayload(buf, len)
             return try {
                 Data.load(head, payload)
             } catch (e: FrameException) {
@@ -327,4 +330,17 @@ class FramedRead(maxFrameSize: Int = DEFAULT_MAX_FRAME_SIZE) {
             return maxOf(if (total > Int.MAX_VALUE) Int.MAX_VALUE else total.toInt(), 5)
         }
     }
+}
+
+/** DATA payloads up to this size are copied out of the read buffer; larger ones are zero-copy slices of it. */
+internal const val DATA_COPY_LIMIT = 16 * 1024
+
+/** A DATA payload of [n] bytes from [buf] (see [FramedRead]: copied when small, sliced when large). */
+private fun takePayload(buf: Buffer, n: Int): Bytes {
+    if (n > DATA_COPY_LIMIT) return buf.readSlice(n)
+    if (n == 0) return Bytes.EMPTY
+    val at = buf.readerIndex()
+    val out = Bytes.copyOf(buf.backingArray(), at, at + n)
+    buf.skip(n)
+    return out
 }

@@ -77,8 +77,32 @@ class FrameRulesTest {
         val data = assertIs<Data>(FramedRead().decode(buf))
         assertTrue(buf.isEmpty)
         buf.writeBytes("XXXXXXXXXXXXXX".encodeToByteArray())
-        // The buffer does not write over the slice (neton-io SPEC §23.7).
+        // The buffer does not write over the payload (neton-io SPEC §23.7).
         assertEquals("hello", data.payload.decodeToString())
+    }
+
+    @Test
+    fun smallDataPayloadIsCopiedOutOfTheReadBuffer() {
+        // A slice would make the connection's read buffer move to a fresh array on its next read.
+        val buf = Buffer().also { it.writeBytes(frame(0, 0, 1, "hello")) }
+        val arr = buf.backingArray()
+        val data = assertIs<Data>(FramedRead().decode(buf))
+        arr[9] = 'j'.code.toByte()
+        assertEquals("hello", data.payload.decodeToString())
+        // The buffer keeps its array for the next read.
+        buf.writeBytes("x".encodeToByteArray())
+        assertTrue(buf.backingArray() === arr)
+    }
+
+    @Test
+    fun largeDataPayloadIsASliceOfTheReadBuffer() {
+        val payload = ByteArray(DATA_COPY_LIMIT + 1) { 'a'.code.toByte() }
+        val buf = Buffer(DATA_COPY_LIMIT + 64).also { it.writeBytes(frame(0, 0, 1, payload)) }
+        val arr = buf.backingArray()
+        val data = assertIs<Data>(FramedRead(maxFrameSize = 32 * 1024).decode(buf))
+        assertEquals(DATA_COPY_LIMIT + 1, data.payload.size)
+        arr[9] = 'b'.code.toByte() // the slice shares the buffer's array
+        assertEquals('b'.code.toByte(), data.payload[0])
     }
 
     // ===== HEADERS =====
