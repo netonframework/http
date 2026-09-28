@@ -2,6 +2,8 @@ package neton.http.h3
 
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import neton.http.h3.proto.Frame
 import neton.http.h3.proto.FrameError
 import neton.http.h3.proto.FrameException
@@ -38,6 +40,7 @@ internal class ConnectionInner private constructor(
     private val encoderSend: SendStream?,
     private val decoderSend: SendStream?,
 ) {
+    private val controlLock = Mutex()
     private var gotControl = false
     private var gotEncoder = false
     private var gotDecoder = false
@@ -46,6 +49,14 @@ internal class ConnectionInner private constructor(
 
     /** Whether the next request stream sends a GREASE frame before finishing (one per connection). */
     var sendGreaseFrame: Boolean = config.sendGrease
+
+    /** The ID in the GOAWAY sent: a request stream ID from a server, a push ID from a client (`sent_closing`). */
+    var sentClosing: Long? = null
+        private set
+
+    /** The ID in the last GOAWAY received (`recv_closing`). */
+    var recvClosing: Long? = null
+        private set
 
     /**
      * Handles GOAWAY, CANCEL_PUSH and MAX_PUSH_ID from the peer's control stream (the server's and client's
@@ -88,6 +99,41 @@ internal class ConnectionInner private constructor(
         )
         is StreamErrorIncoming.Unknown ->
             handleConnectionError(Code.H3_CLOSED_CRITICAL_STREAM, "an error occurred on the control stream ${e.error}")
+    }
+
+    /**
+     * Sends GOAWAY with [maxId] unless a GOAWAY with an ID not above it was already sent (`shutdown`): GOAWAY IDs never
+     * increase (RFC 9114 §5.2). Marks the connection closing.
+     * @throws ConnectionError
+     */
+    suspend fun shutdown(maxId: Long) {
+        connectionError()?.let { throw it }
+        controlLock.withLock {
+            val sent = sentClosing
+            if (sent != null && sent <= maxId) return
+            sentClosing = maxId
+            shared.setClosing()
+            try {
+                // RFC 9114 §3.3: the terminating endpoint SHOULD first send a GOAWAY frame.
+                controlSend.writeBuf(WriteBuf.of(Frame.Goaway(maxId)))
+            } catch (e: StreamErrorIncoming) {
+                throw controlStreamWriteError(e)
+            }
+        }
+    }
+
+    /**
+     * A GOAWAY from the peer (`process_goaway`): its ID must not exceed a previous one's (RFC 9114 §5.2, H3_ID_ERROR);
+     * marks the connection closing.
+     */
+    fun processGoaway(id: Long): InternalConnectionError? {
+        val prev = recvClosing
+        if (prev != null && prev < id) {
+            return InternalConnectionError(Code.H3_ID_ERROR, "received a GoAway ($id) greater than the former one ($prev)")
+        }
+        recvClosing = id
+        shared.setClosing()
+        return null
     }
 
     /**
