@@ -734,3 +734,12 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   - 下一个结构性项：URI 仍以 String 为底，非平凡路径（如 `/index.html`）要经 UTF-8 校验、K/N 解码时再校验一次（约 28 Ir / 字符）并按字符
     扫描，约 1,400 Ir，hyper 约 330。要去掉需把 uri 包改为以字节为底、按需生成 String（hyper 以 `Bytes` 为底），牵涉 Uri / PathAndQuery /
     Authority / Scheme，单独立项。每个头部值一个 `HeaderValue` 对象同理（hyper 中为值类型）。
+- hyper 的 HTTP/2 接线合入（2026-09-28）：服务端与客户端连接（hyper 的默认值、keep-alive ping 与自适应窗口、连接相关头部剥离、CONNECT
+  隧道）、请求与响应消息体；`tests/integration.rs` 的 14 个用例全部移植（每个用例直连与经代理各跑一次）。移植 hyper `tests/server.rs` /
+  `client.rs` 中 HTTP/2 专有用例的工作进行中。
+- **h2spec v2.1.1**（h2 的 CI 所用版本）对 hyper 层 h2c 服务（`echoServer`，`NETON_HTTP_H2=1`）：153 上 epoll 与 io_uring 均
+  **145 / 145 通过**，无跳过（§6 要求全部通过）。
+- **curl 互通（h2c，prior knowledge）**：`H2=1 curl-interop.sh`，两种驱动各 12 项全过——GET、小 POST、5 MB POST、`-T -` 流式上传、
+  未知长度响应、1 MiB 响应、HEAD、连接复用、Date 头、一个连接上 10 路并行多路复用、响应版本为 2。请求目标照 hyper 为由 `:scheme` 与
+  `:authority` 构成的绝对 URI。HTTP/1.x 的 14 项同时复跑通过。
+
