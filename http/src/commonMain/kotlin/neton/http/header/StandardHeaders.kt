@@ -271,6 +271,33 @@ sealed class StandardHeaderNames {
     /** Length of the longest standard name; longer inputs skip the standard lookup. */
     internal val standardMaxLength: Int = standardAll.maxOf { it.length }
 
+    /**
+     * The standard names by length (index = length; empty where none): what [HeaderName.tryFromBytes] compares
+     * against first, as hyper's `StandardHeader::from_bytes` matches on the length before the bytes.
+     */
+    internal val standardByLength: Array<Array<HeaderName>> =
+        Array(standardMaxLength + 1) { len -> standardAll.filter { it.length == len }.toTypedArray() }
+
+    /**
+     * Per length, the [chunkAt] chunks of each name in [standardByLength] (name j, chunk k at `j * chunkCount(len) + k`),
+     * and the matching case masks: 0x20 on letters, so `(input or mask) == chunk` accepts either case for letters
+     * and only the exact byte elsewhere (standard names are lowercase letters and `-`).
+     */
+    internal val standardChunks: Array<LongArray> = Array(standardMaxLength + 1) { len -> chunkTable(len, masks = false) }
+    internal val standardMasks: Array<LongArray> = Array(standardMaxLength + 1) { len -> chunkTable(len, masks = true) }
+
+    private fun chunkTable(len: Int, masks: Boolean): LongArray {
+        val names = standardByLength[len]
+        val n = chunkCount(len)
+        val out = LongArray(names.size * n)
+        for (j in names.indices) {
+            val b = names[j].bytes
+            val src = if (!masks) b else ByteArray(len) { if (b[it] in 'a'.code.toByte()..'z'.code.toByte()) 0x20 else 0 }
+            for (k in 0 until n) out[j * n + k] = chunkAt(src, 0, len, k, n)
+        }
+        return out
+    }
+
     /** Open-addressing slots (linear probing) holding `standardIndex + 1`, 0 meaning empty. */
     internal val standardSlots: ShortArray = ShortArray(STANDARD_SLOT_MASK + 1).also { slots ->
         for (h in standardAll) {

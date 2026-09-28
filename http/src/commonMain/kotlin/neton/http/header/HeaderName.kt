@@ -111,7 +111,56 @@ class HeaderName internal constructor(
         /** Like [fromBytes] but returns null for an invalid name. */
         fun tryFromBytes(src: ByteArray, offset: Int = 0, length: Int = src.size - offset): HeaderName? {
             checkRange(src.size, offset, length)
-            return parse(length, HEADER_CHARS) { src[offset + it].toInt() and 0xff }
+            // Standard names first, compared directly (hyper `StandardHeader::from_bytes`: length, then bytes): a
+            // match needs neither the validating pass nor the hash. Only other names take the general path.
+            // The general path is a separate function: its inlined body would enlarge this frame, zeroed on every call.
+            return findStandard(src, offset, length) ?: parseOther(src, offset, length)
+        }
+
+        /**
+         * A name [findStandard] did not find, so not a standard one: validated, lowercased, hashed and copied in one
+         * pass (the array is garbage in the rare invalid case).
+         */
+        private fun parseOther(src: ByteArray, offset: Int, len: Int): HeaderName? {
+            if (len == 0 || len > MAX_HEADER_NAME_LEN) return null
+            val table = HEADER_CHARS
+            val out = ByteArray(len)
+            var bad = 0
+            var h = HASH_SEED
+            for (i in 0 until len) {
+                val c = table[src[offset + i].toInt() and 0xff].toInt()
+                bad = bad or ((c - 1) ushr 31) // 1 when c == 0
+                h = hashStep(h, c)
+                out[i] = c.toByte()
+            }
+            if (bad != 0) return null
+            return HeaderName(out, hashFinish(h), -1, null)
+        }
+
+        /**
+         * The standard name equal to `src[offset, offset + len)` ignoring ASCII case, or null. Compared a word at a time
+         * against precomputed chunks with case masks, which is exact without a validating pass: standard names are
+         * lowercase letters and `-`, so a letter matches itself or its uppercase form and `-` only itself.
+         */
+        private fun findStandard(src: ByteArray, offset: Int, len: Int): HeaderName? {
+            val byLength = standardByLength
+            if (len <= 0 || len >= byLength.size) return null
+            val names = byLength[len]
+            if (names.isEmpty()) return null
+            val n = chunkCount(len)
+            val chunks = standardChunks[len]
+            val masks = standardMasks[len]
+            val first = chunkAt(src, offset, len, 0, n)
+            var base = 0
+            for (j in names.indices) {
+                if (first or masks[base] == chunks[base]) {
+                    var k = 1
+                    while (k < n && (chunkAt(src, offset, len, k, n) or masks[base + k]) == chunks[base + k]) k++
+                    if (k == n) return names[j]
+                }
+                base += n
+            }
+            return null
         }
 
         /**
