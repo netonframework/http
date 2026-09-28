@@ -67,6 +67,19 @@ class HttpError(val kind: Kind, cause: Throwable? = null) : Exception(describe(k
         return false
     }
 
+    /**
+     * The HTTP/2 reason to reset a stream with for this error (hyper `h2_reason`): the reason of an HTTP/2 error found
+     * in the cause chain, else INTERNAL_ERROR.
+     */
+    internal fun h2Reason(): neton.http.h2.frame.Reason {
+        var c: Throwable? = this
+        while (c != null) {
+            if (c is neton.http.h2.H2Error) return c.reason() ?: neton.http.h2.frame.Reason.INTERNAL_ERROR
+            c = c.cause
+        }
+        return neton.http.h2.frame.Reason.INTERNAL_ERROR
+    }
+
     private companion object {
         fun describe(kind: Kind, cause: Throwable?): String =
             if (cause == null) kind.description else "${kind.description}: ${cause.message ?: cause::class.simpleName}"

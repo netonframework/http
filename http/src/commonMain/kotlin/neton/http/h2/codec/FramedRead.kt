@@ -335,8 +335,8 @@ class FramedRead(maxFrameSize: Int = DEFAULT_MAX_FRAME_SIZE) {
 /** DATA payloads up to this size are copied out of the read buffer; larger ones are zero-copy slices of it. */
 internal const val DATA_COPY_LIMIT = 16 * 1024
 
-/** A DATA payload of [n] bytes from [buf] (see [FramedRead]: copied when small, sliced when large). */
-private fun takePayload(buf: Buffer, n: Int): Bytes {
+/** [n] bytes taken from [buf]: copied when at most [DATA_COPY_LIMIT], else a zero-copy slice (see [FramedRead]). */
+internal fun takePayload(buf: Buffer, n: Int): Bytes {
     if (n > DATA_COPY_LIMIT) return buf.readSlice(n)
     if (n == 0) return Bytes.EMPTY
     val at = buf.readerIndex()
