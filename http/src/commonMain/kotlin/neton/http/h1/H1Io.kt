@@ -31,9 +31,9 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
     var queueStrategy = true
 
     /** The first segment: status line / request line and headers, and everything in the flatten strategy. */
-    private val head = Buffer(INIT_BUFFER_SIZE, pooled = true)
-    private val segments = Array(2 * MAX_BUF_LIST_BUFFERS + 2) { head }
-    private var segmentCount = 0
+    @PublishedApi internal val head = Buffer(INIT_BUFFER_SIZE, pooled = true)
+    @PublishedApi internal val segments = Array(2 * MAX_BUF_LIST_BUFFERS + 2) { head }
+    @PublishedApi internal var segmentCount = 0
     private val framing = ArrayList<Buffer>()
     private var framingUsed = 0
     private val wrappers = ArrayList<Buffer>()
@@ -94,7 +94,9 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
      * hyper `poll_flush`: write everything buffered, then flush the stream. With [flushPipeline] and a pipelined
      * request already in the read buffer, nothing is written yet (the responses are coalesced).
      */
-    suspend fun flush() {
+    // Inline: one continuation less per response (every suspend function call allocates one on Kotlin/Native).
+    @Suppress("NOTHING_TO_INLINE")
+    suspend inline fun flush() {
         if (flushPipeline && readBuf.readableBytes > 0) return
         if (segmentCount == 0) {
             if (head.readableBytes > 0) stream.write(head)
@@ -105,7 +107,7 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
         stream.flush()
     }
 
-    private fun resetWrite() {
+    @PublishedApi internal fun resetWrite() {
         head.clear()
         for (i in 0 until segmentCount) segments[i] = head
         segmentCount = 0
@@ -123,7 +125,8 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
      * Read more into [readBuf] (hyper `poll_read_from_io`). Returns the count, or 0 at EOF (hyper's convention);
      * [readEof] is set then.
      */
-    suspend fun readFromIo(): Int {
+    @Suppress("NOTHING_TO_INLINE")
+    suspend inline fun readFromIo(): Int {
         val n = stream.read(readBuf)
         if (n < 0) { readEof = true; return 0 }
         return n

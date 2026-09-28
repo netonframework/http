@@ -881,7 +881,11 @@ private const val LF = '\n'.code.toByte()
 /** The IMF-fixdate `Date` value (29 bytes), recomputed at most once per second per thread (hyper `common/date.rs`). */
 internal object HttpDate {
     @kotlin.native.concurrent.ThreadLocal
-    private object Cache { var second = Long.MIN_VALUE; var value = ""; var bytes = ByteArray(0) }
+    private object Cache {
+        var second = Long.MIN_VALUE; var value = ""; var bytes = ByteArray(0)
+        /** Monotonic time of the next second boundary: until then the value cannot change. */
+        var nextCheckNanos = Long.MIN_VALUE
+    }
 
     fun now(): String {
         refresh()
@@ -894,9 +898,15 @@ internal object HttpDate {
         return Cache.bytes
     }
 
+    // The wall clock (`Clock.System.now()`) allocates an Instant per call; the monotonic clock does not, so it tells
+    // when the next second starts and the wall clock is read once per second.
     private fun refresh() {
-        val sec = neton.io.core.systemTimeMillis() / 1000
+        val now = neton.io.core.monotonicNanos()
+        if (now < Cache.nextCheckNanos) return
+        val ms = neton.io.core.systemTimeMillis()
+        val sec = ms / 1000
         if (sec != Cache.second) { Cache.second = sec; Cache.value = format(sec); Cache.bytes = Cache.value.encodeToByteArray() }
+        Cache.nextCheckNanos = now + (1000 - ms % 1000) * 1_000_000
     }
 
     private val DAYS = arrayOf("Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed")
