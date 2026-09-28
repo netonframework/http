@@ -65,6 +65,13 @@ class Http1ServerConfig(
     val maxRequestBodySize: Long = 10L * 1024 * 1024,
     /** Hand the connection over after a `101` / CONNECT `2xx` response (hyper `Connection::with_upgrades`). */
     val upgrades: Boolean = false,
+    /**
+     * Admission shared by the connections that should be limited together (neton-io §28.12, SPEC §3.10): an idle
+     * connection holds no permit; one is taken once the first byte of a request is buffered and released when its
+     * response has been written. No free permit within the admission's timeout fails the connection. Keep
+     * [headerReadTimeoutMillis] on so a permit holder cannot stall its head.
+     */
+    val admission: neton.io.core.Admission? = null,
 ) {
     internal fun h1Config() = H1Config(
         parser = parser, maxHeaders = maxHeaders, maxHeaderSectionSize = maxHeaderSectionSize,
@@ -174,16 +181,43 @@ class Http1Connection internal constructor(private val stream: IoStream, private
                 watchError?.let { throw it }
             }
             if (!conn.canReadHead) return
+            val admission = config.admission
+            if (admission != null) {
+                waitingForHead = true
+                try { conn.awaitHeadBytes(config.keepAliveIdleTimeoutMillis) } finally { waitingForHead = false }
+                if (!io.readEof) {
+                    if (!admission.tryAcquire()) {
+                        conn.flushLocked()                   // pipelined responses go out before waiting for a permit
+                        try { admission.acquire() } catch (e: neton.io.core.AdmissionTimeoutException) { conn.close(); throw HttpError(HttpError.Kind.Io, e) }
+                    }
+                    holdingPermit = true
+                }
+            }
+            try {
+                if (!serveOne(first)) return
+            } finally {
+                if (holdingPermit) { holdingPermit = false; admission!!.release() }
+            }
+            first = false
+            if (switched) return
+        }
+    }
+
+    private var holdingPermit = false
+
+    /** Read one head and run its exchange; false when the connection ends instead. Inline: no suspending layer of its own. */
+    @Suppress("NOTHING_TO_INLINE")
+    private suspend inline fun serveOne(first: Boolean): Boolean {
+        run {
             waitingForHead = true
             val parts = try {
                 conn.readHead(config.keepAliveIdleTimeoutMillis, config.headerReadTimeoutMillis, first) as neton.http.RequestParts?
             } finally { waitingForHead = false }
-            first = false
-            if (parts == null) return
+            if (parts == null) return false
             val bodyLength = conn.headBodyLength
             if (config.maxRequestBodySize > 0 && bodyLength > config.maxRequestBodySize) {
                 rejectBodyTooLarge()
-                return
+                return false
             }
             val body = if (bodyLength == 0L) Incoming.EMPTY else Incoming(conn, conn.bodyGeneration, bodyLength)
             if (conn.headWantsUpgrade) {
@@ -193,7 +227,7 @@ class Http1Connection internal constructor(private val stream: IoStream, private
             exchange(Request(parts, body))
             if (conn.canReadBody) conn.drainOrCloseRead()
             conn.tryKeepAlive()
-            if (switched) return
+            return true
         }
     }
 

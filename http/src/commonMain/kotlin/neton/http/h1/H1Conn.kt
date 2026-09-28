@@ -126,6 +126,24 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
         }
     }
 
+    /**
+     * Wait for the first byte of the next head without parsing (admission, SPEC §3.10: no permit is held while idle).
+     * The idle timeout applies ([HttpError.Kind.HeaderTimeout], as in [readHead]); an EOF is left for [readHead].
+     */
+    suspend fun awaitHeadBytes(idleTimeoutMillis: Long) {
+        if (io.readBuf.readableBytes > 0 || io.readEof) return
+        if (idleTimeoutMillis > 0) io.stream.setReadTimeout(idleTimeoutMillis)
+        try {
+            io.readFromIo()
+        } catch (e: TimeoutException) {
+            closeRead()
+            throw HttpError(HttpError.Kind.HeaderTimeout)
+        } catch (e: IoException) {
+            close()
+            throw HttpError(HttpError.Kind.Io, e)
+        }
+    }
+
     /** One parse attempt over the read buffer; null when the head is incomplete (or failed, see [error]). */
     private fun tryParse(): Any? {
         val buf = io.readBuf
