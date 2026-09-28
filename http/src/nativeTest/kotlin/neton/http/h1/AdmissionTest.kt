@@ -13,7 +13,7 @@ import neton.io.bytes.Bytes
 import neton.io.core.Admission
 import neton.io.core.AdmissionTimeoutException
 import neton.io.core.IoStream
-import neton.io.core.memoryStreamPair
+import neton.http.testStreamPair
 import neton.io.net.runReactor
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -42,7 +42,7 @@ class AdmissionTest {
             concurrent--
             ok(req.uri.toString())
         }
-        val (s1, c1) = memoryStreamPair(); val (s2, c2) = memoryStreamPair(); val (s3, c3) = memoryStreamPair()
+        val (s1, c1) = testStreamPair(); val (s2, c2) = testStreamPair(); val (s3, c3) = testStreamPair()
         val servers = listOf(s1, s2, s3).map { s -> async { cfg(admission).serveConnection(s, service).serve() } }
         delay(20)
         assertEquals(0, admission.inUse, "idle connections hold permits")
@@ -68,7 +68,7 @@ class AdmissionTest {
         val admission = Admission(permits = 1, acquireTimeoutMillis = 100)
         val release = CompletableDeferred<Unit>()
         val service = HttpService { req -> if (req.uri.toString() == "/slow") release.await(); ok("x") }
-        val (s1, c1) = memoryStreamPair(); val (s2, c2) = memoryStreamPair()
+        val (s1, c1) = testStreamPair(); val (s2, c2) = testStreamPair()
         val a = async { runCatching { cfg(admission).serveConnection(s1, service).serve() } }
         val b = async { runCatching { cfg(admission).serveConnection(s2, service).serve() } }
         c1.send("GET /slow HTTP/1.1\r\n\r\n")

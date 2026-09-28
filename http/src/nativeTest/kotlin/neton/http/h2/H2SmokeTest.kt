@@ -5,7 +5,7 @@ import kotlinx.coroutines.launch
 import neton.http.Response
 import neton.http.StatusCode
 import neton.http.h2.frame.Settings
-import neton.io.core.memoryStreamPair
+import neton.http.testStreamPair
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -55,7 +55,7 @@ class H2SmokeTest {
 
     @Test
     fun clientServerEndToEndInMemory() = h2Test {
-        val (a, b) = memoryStreamPair()
+        val (a, b) = testStreamPair()
         val server = launch {
             val srv = neton.http.h2.server.handshake(a)
             launch { srv.run() }

@@ -38,7 +38,7 @@ import neton.http.header.HeaderValue
 import neton.http.upgradeOn
 import neton.io.bytes.Bytes
 import neton.io.core.IoStream
-import neton.io.core.memoryStreamPair
+import neton.http.testStreamPair
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -52,7 +52,7 @@ import kotlin.time.Duration.Companion.milliseconds
  * hyper 1.11.1 `tests/client.rs` (module `conn`), the HTTP/2 tests, test for test (names are the Rust names in
  * camelCase). hyper's client and server are [Http2ClientConfig] / [Http2ServerConfig]; the raw h2 servers of the
  * reference are the h2 server of this package (`neton.http.h2.server`), whose connection is driven by `run()` (the
- * reference's `accept` / `poll_closed`). tokio's `duplex(1024)` is a [memoryStreamPair] of 1,024 bytes.
+ * reference's `accept` / `poll_closed`). tokio's `duplex(1024)` is a [neton.http.testStreamPair] of 1,024 bytes (loopback TCP with NETON_HTTP_TEST_TRANSPORT=tcp).
  *
  * - Spawned tasks whose panics the reference would never see are awaited where their outcome is settled by the end
  *   of the test (noted per test); handles the reference drops at the end of a scope are closed there.
@@ -63,7 +63,7 @@ import kotlin.time.Duration.Companion.milliseconds
 class HyperH2ClientTest {
 
     /** `setup_duplex_test_server`: the client's and the server's ends. */
-    private fun duplex(): Pair<IoStream, IoStream> = memoryStreamPair(1024)
+    private suspend fun duplex(): Pair<IoStream, IoStream> = testStreamPair(1024)
 
     /** `drain_til_eof`. */
     private suspend fun drainTilEof(sock: IoStream) {

@@ -16,7 +16,7 @@ import neton.io.bytes.Buffer
 import neton.io.bytes.Bytes
 import neton.io.core.IoException
 import neton.io.core.IoStream
-import neton.io.core.memoryStreamPair
+import neton.http.testStreamPair
 import neton.io.net.runReactor
 import kotlin.random.Random
 import kotlin.test.Test
@@ -64,7 +64,7 @@ class H2FuzzTest {
                 return@repeat // the reference only goes on when the builder succeeds
             }
             runReactor {
-                val (io, _) = memoryStreamPair()
+                val (io, _) = testStreamPair()
                 val (client, _) = handshake(io)
                 try {
                     client.sendRequest(request, true)

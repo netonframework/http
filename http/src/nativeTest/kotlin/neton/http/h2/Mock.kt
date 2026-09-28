@@ -268,7 +268,17 @@ class Handle(private val io: IoStream, val shared: MockShared) {
     fun setMaxRecvFrameSize(size: Int) = codec.setMaxRecvFrameSize(size)
 }
 
-/** `mock::new()`: the library's transport and the test's handle. */
+/**
+ * `mock::new()`: the library's transport and the test's handle.
+ *
+ * Memory-only (SPEC §6 exception): the reference's mock is an in-memory pipe whose bytes the library sees on its very
+ * next poll, and the tests built on it assert exact frame orders that follow from that (a client's SETTINGS ACK
+ * before its first HEADERS, every DATA frame the handle sent already received when `accept` returns, a clean EOF when
+ * the handle is dropped with unread bytes). Over loopback TCP the library sees the handle's bytes only after a
+ * reactor poll round, so those interleavings legitimately differ (and a close with unread bytes is a reset): run with
+ * NETON_HTTP_TEST_TRANSPORT=tcp, 121 of these tests failed on that alone. The same library paths run over TCP in
+ * the hyper-level HTTP/2 tests, TcpEndToEndTest and HammerTest.
+ */
 fun mockNew(): Pair<IoStream, Handle> {
     val (a, b) = memoryStreamPair(capacity = 64 * 1024 * 1024)
     val shared = MockShared()

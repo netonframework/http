@@ -19,6 +19,7 @@ import neton.http.header.HeaderValue
 import neton.io.bytes.Buffer
 import neton.io.bytes.Bytes
 import neton.io.core.IoStream
+import neton.http.testStreamPair
 import neton.io.core.memoryStreamPair
 import neton.io.net.runReactor
 import kotlin.test.Test
@@ -61,7 +62,7 @@ class ServerTest {
 
     @Test
     fun getKeepAliveAndClose() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async { noTimeouts.serveConnection(server) { req -> text("hello ${req.uri}") }.serve() }
         client.send("GET /a HTTP/1.1\r\nHost: x\r\n\r\n")
         assertEquals("HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\nhello /a", client.readUntil("hello /a"))
@@ -73,7 +74,7 @@ class ServerTest {
 
     @Test
     fun pipelinedRequestsAnsweredInOrder() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async { noTimeouts.serveConnection(server) { req -> text(req.uri.toString()) }.serve() }
         client.send("GET /1 HTTP/1.1\r\n\r\nGET /2 HTTP/1.1\r\n\r\nGET /3 HTTP/1.1\r\nconnection: close\r\n\r\n")
         val all = client.readText()
@@ -87,7 +88,7 @@ class ServerTest {
 
     @Test
     fun http10ClosesByDefaultAndKeepsAliveOnRequest() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async { noTimeouts.serveConnection(server) { text("x") }.serve() }
         client.send("GET / HTTP/1.0\r\nconnection: keep-alive\r\n\r\n")
         assertEquals("HTTP/1.0 200 OK\r\nconnection: keep-alive\r\ncontent-length: 1\r\n\r\nx", client.readUntil("\r\n\r\nx"))
@@ -98,7 +99,7 @@ class ServerTest {
 
     @Test
     fun postBodiesLengthAndChunked() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async { noTimeouts.serveConnection(server) { req -> text("got " + req.body.readAllText()) }.serve() }
         client.send("POST / HTTP/1.1\r\ncontent-length: 5\r\n\r\nhello")
         assertTrue(client.readUntil("got hello").endsWith("got hello"))
@@ -110,7 +111,7 @@ class ServerTest {
 
     @Test
     fun unreadBodyInBufferKeepsAliveOtherwiseCloses() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async { noTimeouts.serveConnection(server) { text("ok") }.serve() }
         // A small body already buffered with the head: drained, connection kept.
         client.send("POST / HTTP/1.1\r\ncontent-length: 3\r\n\r\nabc")
@@ -124,7 +125,7 @@ class ServerTest {
 
     @Test
     fun streamingChunkedResponseWithTrailers() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val release = CompletableDeferred<Unit>()
         val body = object : Body {
             var step = 0
@@ -156,7 +157,7 @@ class ServerTest {
             "GET /" + "a".repeat(9000) + " HTTP/1.1\r\n\r\n" to "414 URI Too Long",
             "POST / HTTP/1.1\r\ncontent-length: 1\r\ntransfer-encoding: chunked\r\n\r\n" to "400 Bad Request",
         )) {
-            val (server, client) = memoryStreamPair(256 * 1024)
+            val (server, client) = testStreamPair(256 * 1024)
             val done = async { runCatching { noTimeouts.serveConnection(server) { text("never") }.serve() } }
             client.send(req)
             val r = client.readText()
@@ -168,7 +169,7 @@ class ServerTest {
 
     @Test
     fun expectContinueSentOnFirstBodyRead() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async { noTimeouts.serveConnection(server) { req -> text(req.body.readAllText()) }.serve() }
         client.send("POST / HTTP/1.1\r\nexpect: 100-continue\r\ncontent-length: 2\r\n\r\n")
         assertEquals("HTTP/1.1 100 Continue\r\n\r\n", client.readUntil("\r\n\r\n"))
@@ -180,7 +181,7 @@ class ServerTest {
 
     @Test
     fun clientCloseCancelsSlowService() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val cancelled = CompletableDeferred<Boolean>()
         val done = async {
             runCatching {
@@ -199,7 +200,7 @@ class ServerTest {
 
     @Test
     fun halfCloseKeepsServing() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async {
             Http1ServerConfig(headerReadTimeoutMillis = 0, keepAliveIdleTimeoutMillis = 0, autoDateHeader = false, halfClose = true)
                 .serveConnection(server) { delay(50); text("late") }.serve()
@@ -212,7 +213,7 @@ class ServerTest {
 
     @Test
     fun serviceErrorClosesWithoutResponse() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async { runCatching { noTimeouts.serveConnection(server) { error("boom") }.serve() } }
         client.send("GET / HTTP/1.1\r\n\r\n")
         assertEquals("", client.readText())
@@ -222,7 +223,7 @@ class ServerTest {
 
     @Test
     fun headResponseHasNoBodyAndKnownLengthIsKept() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async { noTimeouts.serveConnection(server) { text("12345") }.serve() }
         client.send("HEAD / HTTP/1.1\r\n\r\n")
         assertEquals("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\n", client.readUntil("\r\n\r\n"))
@@ -233,7 +234,7 @@ class ServerTest {
 
     @Test
     fun declaredBodyOverLimitIs413() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val cfg = Http1ServerConfig(headerReadTimeoutMillis = 0, keepAliveIdleTimeoutMillis = 0, autoDateHeader = false, maxRequestBodySize = 10)
         val done = async { runCatching { cfg.serveConnection(server) { text("never") }.serve() } }
         client.send("POST / HTTP/1.1\r\ncontent-length: 11\r\n\r\n")
@@ -244,13 +245,14 @@ class ServerTest {
 
     @Test
     fun timeoutsNeedReadTimeoutCapability() {
+        // Memory-only: the assertion is about a stream without the ReadTimeout capability (TCP streams have it).
         val (server, _) = memoryStreamPair()
         assertFailsWith<IllegalArgumentException> { Http1ServerConfig().serveConnection(server) { text("x") } }
     }
 
     @Test
     fun emptyBodyOmitsContentLengthOnlyWhereHyperDoes() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val done = async {
             noTimeouts.serveConnection(server) { req ->
                 val status = if (req.uri.toString() == "/204") StatusCode.NO_CONTENT else StatusCode.OK
@@ -266,7 +268,7 @@ class ServerTest {
 
     @Test
     fun upgradeAfterSuspendingServiceHandsOverEveryByte() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val cfg = Http1ServerConfig(headerReadTimeoutMillis = 0, keepAliveIdleTimeoutMillis = 0, autoDateHeader = false, upgrades = true)
         val received = CompletableDeferred<String>()
         val done = async {

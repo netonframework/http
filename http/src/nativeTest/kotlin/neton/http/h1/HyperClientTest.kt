@@ -24,7 +24,7 @@ import neton.http.upgradeOn
 import neton.io.bytes.Buffer
 import neton.io.core.IoException
 import neton.io.core.IoStream
-import neton.io.core.memoryStreamPair
+import neton.http.testStreamPair
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -673,7 +673,7 @@ class HyperClientTest {
 
     @Test
     fun testBodyPanics() = hyperTest {
-        val (clientIo, serverIo) = memoryStreamPair(1024)
+        val (clientIo, serverIo) = testStreamPair(1024)
         // spawn a server that reads but doesn't write
         spawn { serverIo.readToEnd() }
         val (client, conn) = http1Handshake(clientIo)

@@ -10,7 +10,7 @@ import neton.http.Incoming
 import neton.http.Response
 import neton.io.bytes.Buffer
 import neton.io.core.IoStream
-import neton.io.core.memoryStreamPair
+import neton.http.testStreamPair
 import neton.io.net.runReactor
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -73,7 +73,7 @@ class AcceptanceTest {
         var out = ""
         val served = ArrayList<String>()
         runReactor {
-            val (server, client) = memoryStreamPair()
+            val (server, client) = testStreamPair()
             val done = async { echo(served, server = server).serve() }
             var from = 0
             for (to in cuts + script.size) {
@@ -113,7 +113,7 @@ class AcceptanceTest {
         var out = ""
         val served = ArrayList<String>()
         runReactor {
-            val (server, client) = memoryStreamPair()
+            val (server, client) = testStreamPair()
             val done = async { runCatching { echo(served, cfg, server).serve() } }
             client.send((head + "GET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n").encodeToByteArray())
             out = client.readToEof()
@@ -214,7 +214,7 @@ class AcceptanceTest {
 
     @Test
     fun chunkedBodyOverTheLimitIs413WhenTheServicePropagates() = runReactor {
-        val (server, client) = memoryStreamPair()
+        val (server, client) = testStreamPair()
         val cfg = config(maxRequestBodySize = 1024)
         val done = async {
             runCatching {

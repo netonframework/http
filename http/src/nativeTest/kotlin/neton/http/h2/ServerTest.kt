@@ -34,7 +34,7 @@ import neton.http.h2.server.Connection
 import neton.http.h2.server.handshake
 import neton.http.uri.Uri
 import neton.io.bytes.Buffer
-import neton.io.core.memoryStreamPair
+import neton.http.testStreamPair
 import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -1455,7 +1455,7 @@ class ServerTest {
             0x00, 0x00, 0x00, 0x01, 0x05, 0x00, 0x00, 0x11, 0x01,
         )
 
-        val (clientIo, serverIo) = memoryStreamPair(256 * 1024)
+        val (clientIo, serverIo) = testStreamPair(256 * 1024)
         // A "panic" is any exception other than an H2Error: it fails this task and so the test.
         val serverTask = async {
             val server = try {

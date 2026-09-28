@@ -17,7 +17,7 @@ import neton.http.upgradeOn
 import neton.io.bytes.Buffer
 import neton.io.bytes.Bytes
 import neton.io.core.IoStream
-import neton.io.core.memoryStreamPair
+import neton.http.testStreamPair
 import neton.io.net.runReactor
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -42,7 +42,7 @@ class ClientTest {
 
     @Test
     fun requestAndResponseOverScriptedServer() = runReactor {
-        val (a, b) = memoryStreamPair()
+        val (a, b) = testStreamPair()
         val (sender, connection) = http1Handshake(a)
         val run = launch { connection.run() }
         val res = async { sender.sendRequest(Request.builder().method(Method.POST).uri("/x").body(FullBody(bytesOf("hi")) as Body)) }
@@ -65,7 +65,7 @@ class ClientTest {
 
     @Test
     fun notReadyIsCanceled() = runReactor {
-        val (a, b) = memoryStreamPair()
+        val (a, b) = testStreamPair()
         val (sender, connection) = http1Handshake(a)
         val run = launch { runCatching { connection.run() } }
         val first = async { sender.sendRequest(get("/1")) }
@@ -80,7 +80,7 @@ class ClientTest {
 
     @Test
     fun informationalResponsesAreSkippedAndReported() = runReactor {
-        val (a, b) = memoryStreamPair()
+        val (a, b) = testStreamPair()
         val (sender, connection) = http1Handshake(a)
         launch { runCatching { connection.run() } }
         val seen = ArrayList<Int>()
@@ -95,7 +95,7 @@ class ClientTest {
 
     @Test
     fun serverClosingMidResponseIsIncomplete() = runReactor {
-        val (a, b) = memoryStreamPair()
+        val (a, b) = testStreamPair()
         val (sender, connection) = http1Handshake(a)
         val run = async { runCatching { connection.run() } }
         val res = async { runCatching { sender.sendRequest(get("/")) } }
@@ -109,7 +109,7 @@ class ClientTest {
 
     @Test
     fun endToEndWithServerIncludingChunkedAndUpgrade() = runReactor {
-        val (a, b) = memoryStreamPair()
+        val (a, b) = testStreamPair()
         val serverCfg = Http1ServerConfig(headerReadTimeoutMillis = 0, keepAliveIdleTimeoutMillis = 0, autoDateHeader = false, upgrades = true)
         val server = async {
             serverCfg.serveConnection(b) { req ->

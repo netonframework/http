@@ -12,7 +12,7 @@ import neton.http.StatusCode
 import neton.http.Version
 import neton.io.bytes.Buffer
 import neton.io.core.IoStream
-import neton.io.core.memoryStreamPair
+import neton.http.testStreamPair
 import kotlin.test.Ignore
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -506,7 +506,7 @@ class HyperServerTest {
 
     @Test
     fun disableKeepAliveMidRequest() = hyperTest {
-        val (clientIo, serverIo) = memoryStreamPair(1024)
+        val (clientIo, serverIo) = testStreamPair(1024)
         val tx1 = CompletableDeferred<Unit>()
         val tx2 = CompletableDeferred<Unit>()
         val clientTask = spawn {
@@ -969,14 +969,14 @@ class HyperServerTest {
 
     /** hyper panics in `Builder::max_buf_size`; here the options are checked when a connection is made from them. */
     @Test
-    fun maxBufSizePanicTooSmall() {
-        val (a, _) = memoryStreamPair()
+    fun maxBufSizePanicTooSmall() = hyperTest {
+        val (a, _) = testStreamPair()
         assertFailsWith<IllegalArgumentException> { memoryServerConfig(maxBufSize = 8191).serveConnection(a, helloWorld) }
     }
 
     @Test
-    fun maxBufSizeNoPanic() {
-        val (a, _) = memoryStreamPair()
+    fun maxBufSizeNoPanic() = hyperTest {
+        val (a, _) = testStreamPair()
         memoryServerConfig(maxBufSize = 8193).serveConnection(a, helloWorld)
     }
 
