@@ -201,7 +201,9 @@ internal class PingPongState {
 
     /** Whether frames must be buffered before the next frame is read. */
     val hasPending: Boolean
-        get() = hasPendingPong || hasPendingPing && !pendingPingSent || userPings?.state == UserPings.PENDING_PING
+        get() = hasPendingPong ||
+            // A user ping waits while the shutdown ping is in flight, as in `send_pending_ping`.
+            if (hasPendingPing) !pendingPingSent else userPings?.state == UserPings.PENDING_PING
 
     /** A received PING (`recv_ping`). */
     fun recvPing(ping: Ping): ReceivedPing {

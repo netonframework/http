@@ -71,8 +71,11 @@ internal class Prioritize(config: StreamsConfig) {
         flow.assignCapacity(config.remoteInitWindowSz)
     }
 
-    /** Whether any stream waits to write or to be opened (the connection has work). */
+    /** Whether any stream waits to write (the connection has work). */
     val hasPendingSend: Boolean get() = !pendingSend.isEmpty
+
+    /** Whether a stream waits to be opened (it can be once the concurrency limit allows). */
+    val hasPendingOpen: Boolean get() = !pendingOpen.isEmpty
 
     /** Queues a frame to send (`queue_frame`). */
     fun queueFrame(frame: Frame, buffer: Buffer, stream: Stream, task: Task) {

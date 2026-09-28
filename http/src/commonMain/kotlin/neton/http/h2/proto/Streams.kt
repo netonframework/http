@@ -422,8 +422,13 @@ internal class Streams(val peer: Peer, config: StreamsConfig) {
 
     fun hasStreamsOrOtherReferences(): Boolean = counts.hasStreams() || refs > 1
 
-    /** Whether frames are waiting to be buffered for sending (the connection's driver has work). */
-    fun hasPendingWrites(): Boolean = send.hasPendingSend || recv.hasPendingWindowUpdates || recv.refused != 0
+    /**
+     * Whether frames are waiting to be buffered for sending (the connection's driver has work): queued frames,
+     * WINDOW_UPDATEs, a refusal, or a stream waiting to be opened that the concurrency limit now allows.
+     */
+    fun hasPendingWrites(): Boolean =
+        send.hasPendingSend || recv.hasPendingWindowUpdates || recv.refused != 0 ||
+            send.prioritize.hasPendingOpen && counts.canIncNumSendStreams()
 
     /** A new handle to the connection's streams (`Streams::clone`, for a `SendRequest`). */
     fun cloneHandle() {

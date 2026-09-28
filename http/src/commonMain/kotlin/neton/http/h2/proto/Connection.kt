@@ -163,6 +163,9 @@ internal class Connection(
 
     fun hasStreamsOrOtherReferences(): Boolean = streams.hasStreamsOrOtherReferences()
 
+    /** Neither closing nor closed (`State::Open`). */
+    val isOpen: Boolean get() = state == STATE_OPEN
+
     /** Waits until the connection ended; returns its error or null. */
     suspend fun awaitFinished(): ProtoError? {
         while (!isFinished) finishWaiters.await()
@@ -182,6 +185,7 @@ internal class Connection(
         check(!started) { "the connection is already running" }
         started = true
         var result: ProtoError? = null
+        var completed = false
         try {
             coroutineScope {
                 val reader = launch(start = CoroutineStart.UNDISPATCHED) { readLoop() }
@@ -192,14 +196,17 @@ internal class Connection(
                         // A write failed (`poll_complete` / `shutdown` returning an I/O error).
                         ioError(e)
                     }
+                    completed = true
                 } finally {
                     reader.cancel()
                     io.close() // wakes a read parked on the stream
                 }
             }
         } finally {
-            // `Drop for Connection`.
-            streams.recvEof(true)
+            // `Drop for Connection` when the run is cancelled: every stream gets a broken pipe. A connection that ran to
+            // its end already told its streams (EOF or the error), and keeps what is left (the pending-accept streams)
+            // as the reference's `Connection` does until dropped.
+            if (!completed) streams.recvEof(true)
             pingPong.close()
             io.close()
             outcome = result
@@ -222,6 +229,13 @@ internal class Connection(
         driverWoken = false
     }
 
+    /**
+     * The driver is writing the codec's bytes to the stream (it is suspended in a write or flush): nothing else may
+     * touch the codec's write side meanwhile. Otherwise the codec is idle between two synchronous steps, and the
+     * reader may buffer frames into it (see [readLoop]).
+     */
+    private var writing = false
+
     /** The reference's `poll` loop, without the frame reading. Returns the connection error, or null. */
     private suspend fun drive(): ProtoError? {
         while (true) {
@@ -232,20 +246,21 @@ internal class Connection(
                     // The client closes once no stream and no handle is left (`maybe_close_connection_if_no_streams`).
                     if (peer == Peer.Client && !streams.hasStreamsOrOtherReferences()) goAwayNow(Reason.NO_ERROR)
 
-                    val r = try {
-                        pollGoAwayAndReady()
-                    } catch (e: ProtoError) {
-                        e
-                    }
-                    if (r !== NOT_DONE) {
-                        handlePoll2Result(r as ProtoError?)?.let { return it }
-                        continue
+                    streams.clearExpiredResetStreams()
+                    when (bufferControl()) {
+                        CONTROL_FULL -> {
+                            flushCodec()
+                            continue
+                        }
+                        CONTROL_CHANGED -> continue
                     }
                     // The reader may read the next frame.
                     readerGate.wake()
 
                     // Write what the streams queued (`poll_complete`).
-                    pollComplete()
+                    val status = streams.bufferPending(codec)
+                    flushCodec()
+                    if (status == BufferStatus.CodecFull || streams.reclaimWrittenFrame(codec)) continue
 
                     // A GOAWAY was received or sent: close once the streams are done.
                     if ((error != null || goAway.shouldCloseOnIdle) && !streams.hasStreams()) {
@@ -257,7 +272,12 @@ internal class Connection(
                 STATE_CLOSING -> {
                     // Flush, then shut the write side.
                     flushCodec()
-                    if (StreamCapability.HalfClose in io.capabilities) io.shutdownOutput()
+                    writing = true
+                    try {
+                        if (StreamCapability.HalfClose in io.capabilities) io.shutdownOutput()
+                    } finally {
+                        writing = false
+                    }
                     state = STATE_CLOSED
                 }
                 else -> return takeError(closeReason, closeInitiator)
@@ -266,39 +286,31 @@ internal class Connection(
     }
 
     /**
-     * The start of `poll2`: buffers a pending GOAWAY and, when the connection should close now, returns the result
-     * (null for a user's abrupt shutdown, else a GOAWAY error); then buffers the pending PONG, PING, SETTINGS and
-     * refusal (`poll_ready`). Returns [NOT_DONE] to go on.
-     * @throws ProtoError from applying the peer's settings.
+     * The start of `poll2`, synchronous: buffers a pending GOAWAY and, when the connection should close now, applies
+     * the result (none for a user's abrupt shutdown, else a GOAWAY error); then buffers the pending PONG, PING,
+     * SETTINGS ACK / SETTINGS and refusal (`poll_ready`). Returns [CONTROL_READY], [CONTROL_FULL] (the codec must be
+     * flushed first) or [CONTROL_CHANGED] (the connection state changed). Only while not [writing].
      */
-    private suspend fun pollGoAwayAndReady(): Any? {
-        streams.clearExpiredResetStreams()
-        if (goAway.pending != null) ensureCodecCapacity()
-        val reason = goAway.sendPendingGoAway(codec)
-        if (reason != null && goAway.shouldCloseNow) {
-            // A user's abrupt shutdown does not report its own error back.
-            return if (goAway.isUserInitiated) null else ProtoError.libraryGoAway(reason)
+    private fun bufferControl(): Int {
+        try {
+            if (goAway.pending != null && !codec.hasSendCapacity()) return CONTROL_FULL
+            val reason = goAway.sendPendingGoAway(codec)
+            if (reason != null && goAway.shouldCloseNow) {
+                // A user's abrupt shutdown does not report its own error back.
+                handlePoll2Result(if (goAway.isUserInitiated) null else ProtoError.libraryGoAway(reason))?.let { fatal = it }
+                return CONTROL_CHANGED
+            }
+            // (Only a graceful NO_ERROR GOAWAY waits for idle.)
+            if (!pingPong.sendPendingPong(codec)) return CONTROL_FULL
+            if (!pingPong.sendPendingPing(codec)) return CONTROL_FULL
+            if (!settings.pollSend(codec, streams)) return CONTROL_FULL
+            if (streams.recv.sendPendingRefusal(codec) == BufferStatus.CodecFull) return CONTROL_FULL
+            return CONTROL_READY
+        } catch (e: ProtoError) {
+            // From applying the peer's settings.
+            handlePoll2Result(e)?.let { fatal = it }
+            return CONTROL_CHANGED
         }
-        // (Only a graceful NO_ERROR GOAWAY waits for idle.)
-        while (!pingPong.sendPendingPong(codec)) flushCodec()
-        while (!pingPong.sendPendingPing(codec)) flushCodec()
-        while (!settings.pollSend(codec, streams)) flushCodec()
-        while (streams.recv.sendPendingRefusal(codec) == BufferStatus.CodecFull) flushCodec()
-        return NOT_DONE
-    }
-
-    /** Writes the streams' frames (`Streams::poll_complete`). */
-    private suspend fun pollComplete() {
-        while (true) {
-            ensureCodecCapacity()
-            if (streams.bufferPending(codec) == BufferStatus.CodecFull) continue
-            flushCodec()
-            if (!streams.reclaimWrittenFrame(codec)) return
-        }
-    }
-
-    private suspend fun ensureCodecCapacity() {
-        if (!codec.hasSendCapacity()) flushCodec()
     }
 
     // Two segments for vectored writes: the frame bytes and a borrowed DATA payload.
@@ -312,25 +324,30 @@ internal class Connection(
     private suspend fun flushCodec() {
         val fw = codec.writer
         var wrote = false
-        while (true) {
-            if (!fw.isEmpty) {
-                val payload = fw.queuedPayload
-                if (payload != null && payload.size > 0) {
-                    payloadWrapper.borrow(payload)
-                    try {
-                        io.writev(segments, 2)
-                    } finally {
-                        payloadWrapper.borrow(Bytes.EMPTY) // do not keep the payload alive
+        writing = true
+        try {
+            while (true) {
+                if (!fw.isEmpty) {
+                    val payload = fw.queuedPayload
+                    if (payload != null && payload.size > 0) {
+                        payloadWrapper.borrow(payload)
+                        try {
+                            io.writev(segments, 2)
+                        } finally {
+                            payloadWrapper.borrow(Bytes.EMPTY) // do not keep the payload alive
+                        }
+                        fw.advance(payload.size)
+                    } else {
+                        io.write(fw.writeBuffer)
                     }
-                    fw.advance(payload.size)
-                } else {
-                    io.write(fw.writeBuffer)
+                    wrote = true
                 }
-                wrote = true
+                if (!fw.unsetFrame()) break
             }
-            if (!fw.unsetFrame()) break
+            if (wrote) io.flush()
+        } finally {
+            writing = false
         }
-        if (wrote) io.flush()
     }
 
     /** `handle_poll2_result`: returns an error that ends the connection at once, or null. */
@@ -411,15 +428,31 @@ internal class Connection(
 
     private fun readerMustStop(): Boolean = state != STATE_OPEN || goAway.shouldCloseNow || fatal != null
 
+    /**
+     * The frame reading of `poll2`. As in the reference, where one task reads a batch of frames and then buffers
+     * what they caused before any user task runs, the reader buffers the control frames due before the next frame
+     * (PONG, SETTINGS ACK, GOAWAY...) and, after a batch, the streams' frames (RST_STREAM, WINDOW_UPDATE...) into the
+     * codec itself when the driver is not writing; the driver only has to write them. This keeps the reference's
+     * frame order: user coroutines woken by the batch run after its frames are buffered.
+     */
     private suspend fun readLoop() {
         var eof = false
+        // Frames were applied since the last read: the reference's `poll_complete` runs once the transport has no
+        // more data, not before the first frames are read.
+        var processed = false
         while (true) {
             // Once per round, like the reference's poll2 (not per frame: the clock is read once).
             streams.clearExpiredResetStreams()
             while (true) {
                 if (readerMustStop()) return
                 if (!readerMustWait()) break
-                wakeDriver()
+                if (!writing) {
+                    val r = bufferControl()
+                    wakeDriver() // to write them
+                    if (r != CONTROL_FULL && !readerMustWait()) continue
+                } else {
+                    wakeDriver()
+                }
                 readerGate.await()
             }
 
@@ -436,7 +469,12 @@ internal class Connection(
                     readerResult(null)
                     return
                 }
-                // Nothing more to decode: let the driver write what these frames caused, then read more.
+                // Nothing more to decode: buffer what these frames caused (`poll_complete`), let the driver write it,
+                // then read more.
+                if (processed && !writing && state == STATE_OPEN && !readerMustWait() && codec.hasSendCapacity()) {
+                    streams.bufferPending(codec)
+                }
+                processed = false
                 if (driverHasWork()) wakeDriver()
                 val n = try {
                     io.read(readBuf)
@@ -448,6 +486,7 @@ internal class Connection(
                 if (n < 0) eof = true
                 continue
             }
+            processed = true
             try {
                 recvFrame(frame)
             } catch (e: ProtoError) {
@@ -458,7 +497,7 @@ internal class Connection(
 
     /** Whether the driver should look at the connection after a batch of frames. */
     private fun driverHasWork(): Boolean =
-        streams.hasPendingWrites() || error != null || goAway.isGoingAway ||
+        !codec.writer.isEmpty || streams.hasPendingWrites() || error != null || goAway.isGoingAway ||
             peer == Peer.Client && !streams.hasStreamsOrOtherReferences()
 
     /** A result of the reader's `poll2` (null: EOF); applied at once, the driver finishes the job. */
@@ -507,6 +546,8 @@ internal class Connection(
         const val STATE_CLOSING = 1
         const val STATE_CLOSED = 2
 
-        val NOT_DONE = Any()
+        const val CONTROL_READY = 0
+        const val CONTROL_FULL = 1
+        const val CONTROL_CHANGED = 2
     }
 }

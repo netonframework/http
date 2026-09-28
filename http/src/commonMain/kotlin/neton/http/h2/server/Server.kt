@@ -70,9 +70,10 @@ class Connection internal constructor(internal val inner: ProtoConnection) {
      */
     suspend fun accept(): Pair<Request<RecvStream>, SendResponse>? {
         while (true) {
-            // A closed connection yields nothing, even with streams still queued (as the reference).
-            if (inner.isFinished) {
-                inner.outcome?.let { throw H2Error.from(it) }
+            // A closed connection yields nothing, even with streams still queued (as the reference, whose `poll_accept`
+            // first drives the connection: once it is closing, that returns its result when done).
+            if (inner.isFinished || !inner.isOpen) {
+                inner.awaitFinished()?.let { throw H2Error.from(it) }
                 return null
             }
             val ref = inner.streams.nextIncoming()
