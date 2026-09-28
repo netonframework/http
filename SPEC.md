@@ -695,8 +695,12 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
     原样重抛，只有被包装的错误才走到 413。现在无论服务如何传递，头部尚未写出时都回 413 并关闭。
   - **100 MB 上传**（真实 TCP，`maxRequestBodySize` 200 MiB，服务逐帧读完并核对长度与 FNV-1a 校验和）：单独运行时驻留集增长峰值
     12.1–13.1 MiB（3 次），上限 16 MiB。余量不大，且主要取决于 GC 的回收节奏：大于 16 KiB 的数据帧以切片交出，下一次读换新的整缓冲数组，
-    上传期间持续产生垃圾。在全量测试中运行时堆已被先前的测试撑大，增长读数接近 0，该断言只在单独运行时有判别力。上传路径每 MB 的分配量
-    尚未测量，列为后续项。
+    上传期间持续产生垃圾。在全量测试中运行时堆已被先前的测试撑大，增长读数接近 0，该断言只在单独运行时有判别力。
+  - 上传路径的分配（callgrind 分配调用方普查，`echoServer` release 版，curl 上传 5 × 20 MB，epoll）：每个 64 KiB 数据帧约 5 次分配——
+    一个新的 64 KiB 读数组（`Buffer.allocate`：上一个数组已作为切片交出，不回池；池按 2 的幂分级，恰为 64 KiB），以及 `Bytes`、`Frame.Data`、
+    `readBodyFrame` 的续体、`tryRecv` 各一个小对象。即分配量约等于上传量（每上传 1 字节约分配 1 字节），GC 按其节奏回收，驻留集增长的
+    12–15 MiB 即由此而来。hyper 靠引用计数：消费方丢弃 `Bytes` 后读缓冲的内存可被 `reserve` 收回，分配接近 0。在 GC 下，把大帧复制出来
+    分配量相同、还多一次复制，不是改进；唯一的杠杆是显式的"帧用完归还"接口（超出参考的 API），暂不做，记为可选设计。
   - 与 `curl` 互通（HTTP/1.x，curl 7.76.1，153，epoll 与 io_uring 各 14 项全过）：`http-bench/curl-interop.sh` 对 `echoServer` 运行，
     核对服务看到的方法 / 目标 / 版本 / 请求体长度与 FNV-1a 校验和、以及 curl 收到的内容：GET、HTTP/1.0、小 POST、5 MB POST（curl 的
     `Expect: 100-continue`，确认收到 100）、chunked 上传、`-T -` 的 PUT、chunked 响应、1 MiB 响应、HEAD（有长度无体）、保活复用、Date 头、
