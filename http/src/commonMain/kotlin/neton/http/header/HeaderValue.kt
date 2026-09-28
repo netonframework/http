@@ -67,9 +67,7 @@ class HeaderValue private constructor(
     /** Byte comparison with `length` bytes of [other] from [otherOffset] (the reference's `PartialEq<[u8]>`). */
     fun contentEquals(other: ByteArray, otherOffset: Int = 0, otherLength: Int = other.size - otherOffset): Boolean {
         checkRange(other.size, otherOffset, otherLength)
-        if (otherLength != length) return false
-        for (i in 0 until length) if (array[offset + i] != other[otherOffset + i]) return false
-        return true
+        return otherLength == length && bytesEqual(array, offset, other, otherOffset, length)
     }
 
     /** Unsigned lexicographic comparison of the bytes. */

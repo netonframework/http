@@ -30,3 +30,17 @@ internal inline fun chunkAt(bytes: ByteArray, offset: Int, len: Int, k: Int, cou
     len >= 4 -> bytes.loadIntLe(offset + if (k == 0) 0 else len - 4).toLong() and 0xffffffffL
     else -> bytes[offset + k].toLong() and 0xff
 }
+
+/** Whether `a[aOff, aOff + len)` and `b[bOff, bOff + len)` hold the same bytes, compared 8 at a time. */
+internal fun bytesEqual(a: ByteArray, aOff: Int, b: ByteArray, bOff: Int, len: Int): Boolean {
+    var i = 0
+    while (len - i >= 8) {
+        if (a.loadLongLe(aOff + i) != b.loadLongLe(bOff + i)) return false
+        i += 8
+    }
+    while (i < len) {
+        if (a[aOff + i] != b[bOff + i]) return false
+        i++
+    }
+    return true
+}
