@@ -228,6 +228,12 @@ class Uri internal constructor(
             checkRange(bytes.size, offset, length)
             if (length > MAX_LEN) return InvalidUri.ErrorKind.TooLong
             if (length == 0) return InvalidUri.ErrorKind.Empty
+            // `from_shared`'s one-byte cases, before anything is decoded or allocated (a URI is immutable, so one
+            // instance serves every request for `/` or `*`).
+            if (length == 1) {
+                if (bytes[offset] == '/'.code.toByte()) return ROOT
+                if (bytes[offset] == '*'.code.toByte()) return ASTERISK
+            }
             return parseUtf8Input(bytes, offset, length, { parseChecked(it) }) { r ->
                 val pq = (r as Uri).pq
                 if (pq === PathAndQuery.SLASH || pq === PathAndQuery.STAR || pq === PathAndQuery.EMPTY) -1
@@ -239,6 +245,9 @@ class Uri internal constructor(
             if (utf8LengthExceeds(s, 0, s.length, MAX_LEN)) return InvalidUri.ErrorKind.TooLong
             return parseChecked(s)
         }
+
+        private val ROOT = Uri(null, null, PathAndQuery.SLASH)
+        private val ASTERISK = Uri(null, null, PathAndQuery.STAR)
 
         /** `Uri::from_shared` after the length check: dispatches on the request-target form. */
         private fun parseChecked(s: String): Any {
