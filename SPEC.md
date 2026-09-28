@@ -705,3 +705,9 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
     核对服务看到的方法 / 目标 / 版本 / 请求体长度与 FNV-1a 校验和、以及 curl 收到的内容：GET、HTTP/1.0、小 POST、5 MB POST（curl 的
     `Expect: 100-continue`，确认收到 100）、chunked 上传、`-T -` 的 PUT、chunked 响应、1 MiB 响应、HEAD（有长度无体）、保活复用、Date 头、
     未知版本 400。h2 明文部分等 hyper 的 h2 接线合入后进行（153 上的 curl 带 nghttp2）。
+- 模糊测试移植（2026-09-28，macOS 与 153 Linux 全过）：httparse 的 6 个目标（parse_request / parse_response 及其 multspaces 变体、
+  parse_headers、parse_chunk_size）与 http 的 `fuzz_http`（URI、头部名 / 值、状态码字节经构建器）。参考用 libFuzzer，只要求不 panic；
+  本库用固定种子（可复现），每个目标 20,000 例，一半为 HTTP 词元组成的随机输入，一半为该目标合法样本的变异，并额外检查：状态码合法；
+  完整解析的偏移都在已消费范围内；把输入放进更大数组的偏移处结果相同（平移）；完整头部的每个真前缀都是 PARTIAL（增量解析）。
+  完整解析的例数设下限（≥ 5%），实测每个目标 1,700–1,840 例以上，防止生成器退化使前缀检查失去意义。未发现缺陷。
+  h2 的 3 个目标（client、e2e、hpack）中 hpack 已有（`FuzzTest`），client / e2e 等 hyper 的 h2 接线合入后移植；h3 的 varint 随 HTTP/3。
