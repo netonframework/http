@@ -59,6 +59,8 @@ class Request<T>(val parts: RequestParts, var body: T) {
 class RequestBuilder {
     private var parts: RequestParts? = RequestParts()
     private var error: HttpException? = null
+    // The reuse error is created only when it happens: an exception captures a stack trace, far too costly per message.
+    private var used = false
 
     private inline fun and(f: (RequestParts) -> Unit): RequestBuilder {
         val p = parts ?: return this
@@ -87,7 +89,8 @@ class RequestBuilder {
 
     /** Finishes the request. @throws HttpException the first error recorded by the builder. */
     fun <T> body(body: T): Request<T> {
+        if (used) throw HttpException("builder already used")
         error?.let { throw it }
-        return Request(parts!!, body).also { parts = null; error = HttpException("builder already used") }
+        return Request(parts!!, body).also { parts = null; used = true }
     }
 }

@@ -41,6 +41,8 @@ class Response<T>(val parts: ResponseParts, var body: T) {
 class ResponseBuilder {
     private var parts: ResponseParts? = ResponseParts()
     private var error: HttpException? = null
+    // The reuse error is created only when it happens: an exception captures a stack trace, far too costly per message.
+    private var used = false
 
     private inline fun and(f: (ResponseParts) -> Unit): ResponseBuilder {
         val p = parts ?: return this
@@ -64,7 +66,8 @@ class ResponseBuilder {
 
     /** @throws HttpException the first error recorded by the builder. */
     fun <T> body(body: T): Response<T> {
+        if (used) throw HttpException("builder already used")
         error?.let { throw it }
-        return Response(parts!!, body).also { parts = null; error = HttpException("builder already used") }
+        return Response(parts!!, body).also { parts = null; used = true }
     }
 }
