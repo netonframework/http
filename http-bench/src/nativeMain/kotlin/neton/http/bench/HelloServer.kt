@@ -6,6 +6,8 @@ import neton.http.Body
 import neton.http.FullBody
 import neton.http.Response
 import neton.http.h1.Http1ServerConfig
+import neton.http.h1.HttpService
+import neton.http.h2.Http2ServerConfig
 import neton.io.bytes.Bytes
 import neton.io.net.serveTcp
 import kotlinx.cinterop.toKString
@@ -14,7 +16,8 @@ import kotlinx.cinterop.toKString
  * The hello-world HTTP/1 server of the hyper comparison (SPEC §8): every request gets `200` with `Hello, World!`
  * (hyper's `examples/hello.rs`), the date header on, default options.
  *
- * Arguments: host port [reactors] [pipelineFlush=0|1]. Environment NETON_IO_DRIVER picks the driver.
+ * Arguments: host port [reactors] [pipelineFlush=0|1]. Environment NETON_IO_DRIVER picks the driver; NETON_HTTP_H2=1
+ * serves HTTP/2 over cleartext with prior knowledge (hyper's `http2::Builder` defaults) instead of HTTP/1.
  */
 fun main(args: Array<String>) {
     val host = args.getOrElse(0) { "127.0.0.1" }
@@ -34,9 +37,13 @@ fun main(args: Array<String>) {
     println("helloServer on $host:$port reactors=$reactors pipelineFlush=$pipelineFlush minHeapMb=$minHeap")
     // NETON_HTTP_GC_STATS=1: print the GC epoch and last pause once a second (to relate collections to latency).
     if (platform.posix.getenv("NETON_HTTP_GC_STATS")?.toKString() == "1") startGcStats()
+    val h2 = platform.posix.getenv("NETON_HTTP_H2")?.toKString() == "1"
+    if (h2) println("h2c")
+    val service = HttpService { Response<Body>(FullBody(hello)) }   // hyper: Response::new(Full::new(..))
     serveTcp(host, port, reactors = reactors, shutdownOnSignals = true) { stream ->
         runCatching {
-            config.serveConnection(stream) { Response<Body>(FullBody(hello)) }.serve()   // hyper: Response::new(Full::new(..))
+            if (h2) Http2ServerConfig().serveConnection(stream, service).serve()
+            else config.serveConnection(stream, service).serve()
         }
     }
 }
