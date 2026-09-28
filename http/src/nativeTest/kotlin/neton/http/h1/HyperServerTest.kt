@@ -1061,9 +1061,9 @@ class HyperServerTest {
     }
 
     /**
-     * hyper connects with an HTTP/2-only client and expects an error. The HTTP/2 client is not part of this port; its
-     * first bytes (the connection preface) are sent instead: the HTTP/1 connection fails (`VersionH2`) without writing
-     * an HTTP/1 response.
+     * hyper connects with an HTTP/2-only client and expects an error. Here its first bytes (the connection preface) are
+     * sent instead: the HTTP/1 connection fails (`VersionH2`) without writing an HTTP/1 response. The run with the
+     * HTTP/2 client is `neton.http.h2.HyperH2ServerTest.http1Only`.
      */
     @Test
     fun http1Only() = hyperTest {
