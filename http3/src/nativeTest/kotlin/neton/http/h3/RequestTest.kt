@@ -21,19 +21,26 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import neton.http.h3.client.builder as clientBuilder
 import neton.http.h3.client.newClient
 import neton.http.h3.server.builder as serverBuilder
 import neton.http.h3.server.newConnection
 
-// Port of h3 0.0.8 `src/tests/request.rs` (38 tests) onto the in-memory QUIC double (SPEC §5, layer 2). Differences
+// Port of h3 0.0.8 `src/tests/request.rs` (38 tests) onto the thin QUIC interface; it runs on the in-memory
+// double (SPEC §5 layer 2, RequestTestMemory) and on neton.quic over loopback UDP (layer 3, RequestTestQuic). Differences
 // in the port are noted test by test. The expected sizes in the header-limit tests are the reference's (name + value +
 // 32 per line, RFC 9114 §4.2.2): `GET http://localhost/salut` is 179, its `:method` line alone 42.
-class RequestTest {
+abstract class RequestTest {
+    /** The QUIC the scenarios run on: the in-memory double (layer 2) or neton.quic on loopback UDP (layer 3). */
+    abstract val quic: QuicPairFactory
+
+    private suspend fun CoroutineScope.quicPair(idleTimeout: Duration? = null) = with(quic) { pair(idleTimeout, null) }
+
     @Test
     fun get() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (driver, client) = newClient(cq)
             launch { driver.run() }
@@ -55,7 +62,7 @@ class RequestTest {
 
     @Test
     fun get_with_trailers_unknown_content_type() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (driver, client) = newClient(cq)
             launch { driver.run() }
@@ -73,7 +80,7 @@ class RequestTest {
 
     @Test
     fun get_with_trailers_known_content_type() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (driver, client) = newClient(cq)
             launch { driver.run() }
@@ -89,7 +96,7 @@ class RequestTest {
         client.join()
     }
 
-    private suspend fun CoroutineScope.serveWithTrailers(sq: MemoryConnection) {
+    private suspend fun CoroutineScope.serveWithTrailers(sq: neton.http.h3.quic.Connection) {
         val incoming = newConnection(sq)
         launch { incoming.run() }
         val (_, stream) = getStreamBlocking(incoming)!!
@@ -102,7 +109,7 @@ class RequestTest {
 
     @Test
     fun post() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (driver, client) = newClient(cq)
             launch { driver.run() }
@@ -125,7 +132,7 @@ class RequestTest {
 
     @Test
     fun header_too_big_response_from_server() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (driver, client) = newClient(cq)
             launch { driver.run() }
@@ -148,7 +155,7 @@ class RequestTest {
 
     @Test
     fun header_too_big_response_from_server_trailers() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (driver, client) = newClient(cq)
             launch { driver.run() }
@@ -172,7 +179,7 @@ class RequestTest {
 
     @Test
     fun header_too_big_client_error() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val server = launch {
             val incoming = serverBuilder().maxFieldSectionSize(12).build(sq)
             launch { incoming.run() }
@@ -196,7 +203,7 @@ class RequestTest {
 
     @Test
     fun header_too_big_client_error_trailer() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val received = CompletableDeferred<Unit>()
         val server = launch {
             val incoming = serverBuilder().maxFieldSectionSize(207).build(sq)
@@ -226,7 +233,7 @@ class RequestTest {
 
     @Test
     fun header_too_big_discard_from_client() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val server = launch {
             val incoming = newConnection(sq)
             launch { incoming.run() }
@@ -265,7 +272,7 @@ class RequestTest {
 
     @Test
     fun header_too_big_discard_from_client_trailers() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val server = launch {
             val incoming = newConnection(sq)
             launch { incoming.run() }
@@ -291,7 +298,7 @@ class RequestTest {
 
     @Test
     fun header_too_big_server_error() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (driver, client) = newClient(cq)
             launch { driver.run() }
@@ -311,7 +318,7 @@ class RequestTest {
 
     @Test
     fun header_too_big_server_error_trailers() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (driver, client) = newClient(cq)
             launch { driver.run() }
@@ -335,7 +342,7 @@ class RequestTest {
 
     @Test
     fun get_timeout_client_recv_response() = h3Test {
-        val (cq, sq) = memoryQuicPair(this, idleTimeout = 300.milliseconds)
+        val (cq, sq) = quicPair(idleTimeout = 300.milliseconds)
         val server = launch {
             val incoming = newConnection(sq)
             launch { incoming.run() }
@@ -355,7 +362,7 @@ class RequestTest {
 
     @Test
     fun get_timeout_client_recv_data() = h3Test {
-        val (cq, sq) = memoryQuicPair(this, idleTimeout = 300.milliseconds)
+        val (cq, sq) = quicPair(idleTimeout = 300.milliseconds)
         val server = launch {
             val incoming = newConnection(sq)
             launch { incoming.run() }
@@ -375,7 +382,7 @@ class RequestTest {
 
     @Test
     fun get_timeout_server_accept() = h3Test {
-        val (cq, sq) = memoryQuicPair(this, idleTimeout = 300.milliseconds)
+        val (cq, sq) = quicPair(idleTimeout = 300.milliseconds)
         val client = launch {
             val (conn, _) = newClient(cq)
             assertIs<ConnectionError.Timeout>(conn.run())
@@ -388,7 +395,7 @@ class RequestTest {
 
     @Test
     fun post_timeout_server_recv_data() = h3Test {
-        val (cq, sq) = memoryQuicPair(this, idleTimeout = 300.milliseconds)
+        val (cq, sq) = quicPair(idleTimeout = 300.milliseconds)
         val client = launch {
             val (_, client) = newClient(cq)
             client.sendRequest(Request.post("http://localhost/salut").body(Unit))
@@ -542,7 +549,7 @@ class RequestTest {
      * the raw client reads until the end of the stream or the connection.
      */
     private fun requestSequenceCheck(expected: Code?, request: (Buffer) -> Unit) = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val serverDone = CompletableDeferred<Unit>()
         val server = async {
             val incoming = newConnection(sq)
@@ -570,9 +577,13 @@ class RequestTest {
             raw.send(buf)
             raw.finish()
             val read = runCatching { raw.drain() }
-            // Close the only sender: no more requests.
+            // Close the only sender: no more requests. When the read failed the connection is gone: the driver ends
+            // by itself, and closing first would race with it noticing the peer's close (the double closes
+            // synchronously; over neton.quic the driver learns of the close on its next resumption).
+            if (read.isSuccess) send.close()
+            val result = read.exceptionOrNull() to drive.await()
             send.close()
-            read.exceptionOrNull() to drive.await()
+            result
         }
         val (serverDriver, serverStream) = server.await()
         val (clientRead, clientDriver) = client.await()
@@ -592,4 +603,14 @@ class RequestTest {
             assertNull(serverStream, "the stream closes without error")
         }
     }
+}
+
+/** [RequestTest] on the in-memory QUIC double. */
+class RequestTestMemory : RequestTest() {
+    override val quic = MEMORY_QUIC
+}
+
+/** [RequestTest] on neton.quic over loopback UDP (handshake: the TLS test double). */
+class RequestTestQuic : RequestTest() {
+    override val quic = NETON_QUIC
 }

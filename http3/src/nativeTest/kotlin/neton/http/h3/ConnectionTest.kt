@@ -1,6 +1,7 @@
 package neton.http.h3
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -19,6 +20,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.test.fail
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import neton.http.h3.client.builder as clientBuilder
@@ -26,13 +28,19 @@ import neton.http.h3.client.newClient
 import neton.http.h3.server.builder as serverBuilder
 import neton.http.h3.server.newConnection
 
-// Port of h3 0.0.8 `src/tests/connection.rs` (19 tests) onto the in-memory QUIC double (SPEC §5, layer 2). quinn's
+// Port of h3 0.0.8 `src/tests/connection.rs` (19 tests) onto the thin QUIC interface; it runs on the in-memory
+// double (SPEC §5 layer 2, ConnectionTestMemory) and on neton.quic over loopback UDP (layer 3, ConnectionTestQuic). quinn's
 // endpoints become `memoryQuicPair`; the reference's `tokio::join!` / `select!` become coroutines. Differences in the
 // port, test by test, are noted where they occur; the ⚖️ GOAWAY boundary (SPEC §5) changes no assertion here.
-class ConnectionTest {
+abstract class ConnectionTest {
+    /** The QUIC the scenarios run on: the in-memory double (layer 2) or neton.quic on loopback UDP (layer 3). */
+    abstract val quic: QuicPairFactory
+
+    private suspend fun CoroutineScope.quicPair(idleTimeout: Duration? = null) = with(quic) { pair(idleTimeout, null) }
+
     @Test
     fun connect() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val built = CompletableDeferred<Unit>()
         val client = async {
             val (drive, _) = newClient(cq)
@@ -48,7 +56,7 @@ class ConnectionTest {
 
     @Test
     fun accept_request_end_on_client_close() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val accepted = CompletableDeferred<Unit>()
         val client = launch {
             val (driver, send) = newClient(cq)
@@ -66,7 +74,7 @@ class ConnectionTest {
 
     @Test
     fun server_drop_close() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val sent = CompletableDeferred<Unit>()
         val server = launch {
             val s = newConnection(sq)
@@ -89,7 +97,7 @@ class ConnectionTest {
     // responds.
     @Test
     fun server_send_data_without_finish() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (_, send) = newClient(cq)
             val req = send.sendRequest(Request.get("http://no.way").body(Unit))
@@ -107,7 +115,7 @@ class ConnectionTest {
 
     @Test
     fun client_close_only_on_last_sender_drop() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val server = launch {
             val incoming = newConnection(sq)
             launch { incoming.run() }
@@ -134,7 +142,7 @@ class ConnectionTest {
     @Test
     fun settings_exchange_client() = h3Test {
         // RFC 9114 §3.2: a SETTINGS frame is the first frame of each endpoint's control stream.
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val server = launch {
             val incoming = serverBuilder().maxFieldSectionSize(12).build(sq)
             launch { incoming.run() }
@@ -149,7 +157,7 @@ class ConnectionTest {
 
     @Test
     fun settings_exchange_server() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val (conn, _) = clientBuilder().maxFieldSectionSize(12).build(cq)
             conn.run()
@@ -165,7 +173,7 @@ class ConnectionTest {
 
     @Test
     fun client_error_on_bidi_recv() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val server = launch {
             // A raw server opening a bidirectional stream.
             val s = sq.openBi()
@@ -194,7 +202,7 @@ class ConnectionTest {
     @Test
     fun two_control_streams() = h3Test {
         // RFC 9114 §6.2.1: a second control stream is H3_STREAM_CREATION_ERROR.
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         repeat(2) { cq.openUni().send(Buffer().varint(StreamType.CONTROL)) }
         val incoming = newConnection(sq)
         launch { incoming.run() }
@@ -203,7 +211,7 @@ class ConnectionTest {
 
     @Test
     fun control_close_send_error() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val control = cq.openUni()
             control.send(Buffer().varint(StreamType.CONTROL))
@@ -232,7 +240,7 @@ class ConnectionTest {
     @Test
     fun missing_settings() = h3Test {
         // RFC 9114 §6.2.1: another first frame on the control stream is H3_MISSING_SETTINGS.
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         cq.openUni().send(Buffer().varint(StreamType.CONTROL).frame(Frame.CancelPush(0)))
         val incoming = newConnection(sq)
         launch { incoming.run() }
@@ -242,7 +250,7 @@ class ConnectionTest {
     @Test
     fun control_stream_frame_unexpected() = h3Test {
         // RFC 9114 §7.2.1: DATA on a control stream is H3_FRAME_UNEXPECTED.
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val control = cq.openUni()
         control.send(controlWithSettings())
         control.send(Buffer().frame(dataFrame("")))
@@ -254,7 +262,7 @@ class ConnectionTest {
     @Test
     fun timeout_on_control_frame_read() = h3Test {
         // Port: the reference's 10 ms quinn idle timeout; 300 ms here (loaded test machines).
-        val (cq, sq) = memoryQuicPair(this, idleTimeout = 300.milliseconds)
+        val (cq, sq) = quicPair(idleTimeout = 300.milliseconds)
         val client = launch {
             val (driver, _) = newClient(cq)
             driver.run()
@@ -267,7 +275,7 @@ class ConnectionTest {
 
     @Test
     fun goaway_from_server_not_request_id() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         // A raw server: SETTINGS, then GOAWAY with a server-initiated unidirectional stream ID.
         // RFC 9114 §7.2.6: a GOAWAY with a stream ID of another type is H3_ID_ERROR for the client.
         val control = sq.openUni()
@@ -281,7 +289,7 @@ class ConnectionTest {
 
     @Test
     fun graceful_shutdown_server_rejects() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val done = CompletableDeferred<Unit>()
         val server = launch {
             val incoming = newConnection(sq)
@@ -305,7 +313,7 @@ class ConnectionTest {
 
     @Test
     fun graceful_shutdown_grace_interval() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val server = launch {
             val incoming = newConnection(sq)
             launch { incoming.run() }
@@ -338,7 +346,7 @@ class ConnectionTest {
 
     @Test
     fun graceful_shutdown_closes_when_idle() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val server = async {
             val incoming = newConnection(sq)
             launch { incoming.run() }
@@ -369,7 +377,7 @@ class ConnectionTest {
 
     @Test
     fun graceful_shutdown_client() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val server = launch {
             val incoming = newConnection(sq)
             launch { incoming.run() }
@@ -385,7 +393,7 @@ class ConnectionTest {
     // The server still processes the connection while a request stream is started but sends nothing more.
     @Test
     fun server_not_blocking_on_idle_request() = h3Test(100.seconds) {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val client = launch {
             val control = cq.openUni()
             control.send(controlWithSettings())
@@ -408,4 +416,14 @@ class ConnectionTest {
         assertNotNull(req1.await())
         client.join()
     }
+}
+
+/** [ConnectionTest] on the in-memory QUIC double. */
+class ConnectionTestMemory : ConnectionTest() {
+    override val quic = MEMORY_QUIC
+}
+
+/** [ConnectionTest] on neton.quic over loopback UDP (handshake: the TLS test double). */
+class ConnectionTestQuic : ConnectionTest() {
+    override val quic = NETON_QUIC
 }

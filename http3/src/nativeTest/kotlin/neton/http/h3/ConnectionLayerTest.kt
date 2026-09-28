@@ -1,6 +1,7 @@
 package neton.http.h3
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.yield
@@ -45,7 +46,7 @@ private class RawControl(private val stream: RecvStream, leftover: Buffer) {
 }
 
 /** Accepts [conn]'s peer unidirectional streams until the control stream. */
-private suspend fun acceptControl(conn: MemoryConnection): RawControl {
+private suspend fun acceptControl(conn: neton.http.h3.quic.Connection): RawControl {
     while (true) {
         val s = conn.acceptUni()
         val buf = Buffer()
@@ -58,16 +59,24 @@ private suspend fun acceptControl(conn: MemoryConnection): RawControl {
 // Tests the reference does not have (SPEC §5, first-version scope and layer 2): critical streams, QPACK stream
 // validation surfacing as connection errors, the 431 path, cancellation isolation, a blocked request stream not
 // blocking others, the ⚖️ GOAWAY boundary, and other stream-type and control-stream rules.
-class ConnectionLayerTest {
+// They run on the in-memory double (ConnectionLayerTestMemory) and on neton.quic over loopback UDP
+// (ConnectionLayerTestQuic).
+abstract class ConnectionLayerTest {
+    /** The QUIC the scenarios run on: the in-memory double (layer 2) or neton.quic on loopback UDP (layer 3). */
+    abstract val quic: QuicPairFactory
+
+    private suspend fun CoroutineScope.quicPair(streamCapacity: Int? = null) = with(quic) { pair(null, streamCapacity) }
+
     // ---- critical streams (RFC 9114 §6.2.1, RFC 9204 §4.2): closed or reset → H3_CLOSED_CRITICAL_STREAM ----
 
-    private suspend fun serverFailsAfter(code: Code, rawClient: suspend (MemoryConnection) -> Unit) {
-        val (cq, sq) = memoryQuicPair()
+    private suspend fun CoroutineScope.serverFailsAfter(code: Code, rawClient: suspend (neton.http.h3.quic.Connection) -> Unit) {
+        val (cq, sq) = quicPair()
         rawClient(cq)
         val incoming = newConnection(sq)
         assertLocal(code, incoming.run())
         assertLocal(code, failsWith<ConnectionError> { incoming.accept() })
-        assertEquals(code.value, cq.link.closeCode, "the code the connection is closed with")
+        eventually { cq.applicationCloseCode() != null }
+        assertEquals(code.value, cq.applicationCloseCode(), "the code the connection is closed with")
     }
 
     @Test
@@ -80,28 +89,41 @@ class ConnectionLayerTest {
         }
     }
 
+    // A reset stream whose type never arrived is ignored (RFC 9114 §6.2), and over QUIC a reset abandons the data not
+    // yet sent: the reset must follow the type's delivery. The raw client waits until the server has its SETTINGS
+    // (sent after the stream type in the decoder case), which the double delivers at once.
     @Test
     fun decoderStreamResetIsCriticalClosure() = h3Test {
-        serverFailsAfter(Code.H3_CLOSED_CRITICAL_STREAM) { cq ->
-            cq.openUni().send(controlWithSettings())
-            val dec = cq.openUni()
-            dec.send(Buffer().varint(StreamType.DECODER))
-            dec.reset(Code.H3_NO_ERROR.value)
-        }
+        val (cq, sq) = quicPair()
+        val incoming = newConnection(sq)
+        val drive = async { incoming.run() }
+        val dec = cq.openUni()
+        dec.send(Buffer().varint(StreamType.DECODER))
+        cq.openUni().send(controlWithSettings())
+        eventually { incoming.peerSettings != null }
+        dec.reset(Code.H3_NO_ERROR.value)
+        assertLocal(Code.H3_CLOSED_CRITICAL_STREAM, drive.await())
+        eventually { cq.applicationCloseCode() != null }
+        assertEquals(Code.H3_CLOSED_CRITICAL_STREAM.value, cq.applicationCloseCode())
     }
 
     @Test
     fun controlStreamResetIsCriticalClosure() = h3Test {
-        serverFailsAfter(Code.H3_CLOSED_CRITICAL_STREAM) { cq ->
-            val control = cq.openUni()
-            control.send(controlWithSettings())
-            control.reset(Code.H3_NO_ERROR.value)
-        }
+        val (cq, sq) = quicPair()
+        val incoming = newConnection(sq)
+        val drive = async { incoming.run() }
+        val control = cq.openUni()
+        control.send(controlWithSettings())
+        eventually { incoming.peerSettings != null }
+        control.reset(Code.H3_NO_ERROR.value)
+        assertLocal(Code.H3_CLOSED_CRITICAL_STREAM, drive.await())
+        eventually { cq.applicationCloseCode() != null }
+        assertEquals(Code.H3_CLOSED_CRITICAL_STREAM.value, cq.applicationCloseCode())
     }
 
     @Test
     fun stopSendingOnLocalControlStreamIsCriticalClosure() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         val drive = async { incoming.run() }
         cq.openUni().send(controlWithSettings())
@@ -113,7 +135,7 @@ class ConnectionLayerTest {
 
     @Test
     fun serverControlStreamClosedOnClient() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val control = sq.openUni()
         control.send(controlWithSettings())
         control.finish()
@@ -151,7 +173,7 @@ class ConnectionLayerTest {
 
     @Test
     fun sectionAcknowledgmentIsDecoderStreamErrorOnClient() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         sq.openUni().send(controlWithSettings())
         // No section with a dynamic reference was ever sent: Section Acknowledgment of stream 0 is an error.
         sq.openUni().send(Buffer().varint(StreamType.DECODER).bytes(0x80))
@@ -161,7 +183,7 @@ class ConnectionLayerTest {
 
     @Test
     fun validQpackInstructionsKeepTheConnection() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         val drive = async { incoming.run() }
         cq.openUni().send(controlWithSettings())
@@ -192,7 +214,7 @@ class ConnectionLayerTest {
 
     @Test
     fun unknownStreamTypeIsStopped() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         val drive = async { incoming.run() }
         cq.openUni().send(controlWithSettings())
@@ -216,7 +238,7 @@ class ConnectionLayerTest {
 
     @Test
     fun pushStreamWithoutMaxPushIdIsIdErrorOnClient() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         sq.openUni().send(controlWithSettings())
         sq.openUni().send(Buffer().varint(StreamType.PUSH).varint(0))
         val (driver, _) = newClient(cq)
@@ -260,7 +282,7 @@ class ConnectionLayerTest {
 
     @Test
     fun maxPushIdOnClientControlStreamIsFrameUnexpected() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         sq.openUni().send(controlWithSettings().frame(Frame.MaxPushId(3)))
         val (driver, _) = newClient(cq)
         assertLocal(Code.H3_FRAME_UNEXPECTED, driver.run())
@@ -268,7 +290,7 @@ class ConnectionLayerTest {
 
     @Test
     fun maxPushIdAndCancelPushIgnoredByServer() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         val drive = async { incoming.run() }
         cq.openUni().send(controlWithSettings().frame(Frame.MaxPushId(3)).frame(Frame.CancelPush(1)))
@@ -282,7 +304,7 @@ class ConnectionLayerTest {
 
     @Test
     fun tooManyFieldsGets431AndConnectionContinues() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = serverBuilder().maxFieldCount(3).build(sq)
         launch { incoming.run() }
         val (driver, send) = newClient(cq)
@@ -308,7 +330,7 @@ class ConnectionLayerTest {
 
     @Test
     fun oversizedHeadersFrameGets431FromItsFrameHeader() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = serverBuilder().maxHeadersFrameSize(16).build(sq)
         launch { incoming.run() }
         val (driver, send) = newClient(cq)
@@ -335,7 +357,7 @@ class ConnectionLayerTest {
 
     @Test
     fun oversizedResponseHeadersFrameFailsOnClient() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         launch { incoming.run() }
         val (driver, send) = clientBuilder().maxHeadersFrameSize(32).build(cq)
@@ -358,7 +380,7 @@ class ConnectionLayerTest {
 
     @Test
     fun clientCancellationIsIsolated() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         val serverDrive = async { incoming.run() }
         val (driver, send) = newClient(cq)
@@ -387,7 +409,7 @@ class ConnectionLayerTest {
 
     @Test
     fun serverCancellationIsIsolated() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         val serverDrive = async { incoming.run() }
         val (driver, send) = newClient(cq)
@@ -410,7 +432,7 @@ class ConnectionLayerTest {
 
     @Test
     fun blockedRequestStreamDoesNotBlockOthers() = h3Test {
-        val (cq, sq) = memoryQuicPair(streamCapacity = 1024)
+        val (cq, sq) = quicPair(streamCapacity = 1024)
         val incoming = newConnection(sq)
         launch { incoming.run() }
         val (driver, send) = newClient(cq)
@@ -449,7 +471,7 @@ class ConnectionLayerTest {
 
     @Test
     fun blockedRequestBodyDoesNotBlockOthers() = h3Test {
-        val (cq, sq) = memoryQuicPair(streamCapacity = 1024)
+        val (cq, sq) = quicPair(streamCapacity = 1024)
         val incoming = newConnection(sq)
         launch { incoming.run() }
         val (driver, send) = newClient(cq)
@@ -483,7 +505,7 @@ class ConnectionLayerTest {
 
     @Test
     fun goawayIdIsFirstRejectedStreamAndBoundaryIsRejected() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         launch { incoming.run() }
         cq.openUni().send(controlWithSettings())
@@ -512,7 +534,7 @@ class ConnectionLayerTest {
 
     @Test
     fun shutdownBeforeAnyRequestRejectsStreamZero() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         launch { incoming.run() }
         cq.openUni().send(controlWithSettings())
@@ -529,7 +551,7 @@ class ConnectionLayerTest {
 
     @Test
     fun shutdownWithGraceIntervalAndNeverIncreasingGoaway() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         launch { incoming.run() }
         cq.openUni().send(controlWithSettings())
@@ -550,7 +572,7 @@ class ConnectionLayerTest {
 
     @Test
     fun increasingGoawayIsIdErrorOnClient() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         sq.openUni().send(controlWithSettings().frame(Frame.Goaway(8)).frame(Frame.Goaway(4)).frame(Frame.Goaway(12)))
         val (driver, send) = newClient(cq)
         val err = assertLocal(Code.H3_ID_ERROR, driver.run())
@@ -567,7 +589,7 @@ class ConnectionLayerTest {
 
     @Test
     fun requestAfterGoawayIsRemoteClosing() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         sq.openUni().send(controlWithSettings().frame(Frame.Goaway(0)))
         val (driver, send) = newClient(cq)
         launch { driver.run() }
@@ -579,7 +601,7 @@ class ConnectionLayerTest {
 
     @Test
     fun malformedRequestIsStreamErrorOnly() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         val drive = async { incoming.run() }
         cq.openUni().send(controlWithSettings())
@@ -596,7 +618,7 @@ class ConnectionLayerTest {
 
     @Test
     fun contentLengthMismatchIsMessageError() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         launch { incoming.run() }
         val (driver, send) = newClient(cq)
@@ -613,7 +635,7 @@ class ConnectionLayerTest {
 
     @Test
     fun contentLengthExceededIsMessageError() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         launch { incoming.run() }
         val (driver, send) = newClient(cq)
@@ -627,7 +649,7 @@ class ConnectionLayerTest {
 
     @Test
     fun pseudoHeaderInTrailersIsMessageError() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         launch { incoming.run() }
         cq.openUni().send(controlWithSettings())
@@ -643,7 +665,7 @@ class ConnectionLayerTest {
 
     @Test
     fun emptyDataFrameDoesNotEndTheBody() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         launch { incoming.run() }
         cq.openUni().send(controlWithSettings())
@@ -657,7 +679,7 @@ class ConnectionLayerTest {
 
     @Test
     fun splitStreamsWorkFromDifferentCoroutines() = h3Test {
-        val (cq, sq) = memoryQuicPair()
+        val (cq, sq) = quicPair()
         val incoming = newConnection(sq)
         launch { incoming.run() }
         val (driver, send) = newClient(cq)
@@ -682,4 +704,14 @@ class ConnectionLayerTest {
         assertEquals("chunk0;chunk1;chunk2;chunk3;chunk4;", reader.await())
         server.join()
     }
+}
+
+/** [ConnectionLayerTest] on the in-memory QUIC double. */
+class ConnectionLayerTestMemory : ConnectionLayerTest() {
+    override val quic = MEMORY_QUIC
+}
+
+/** [ConnectionLayerTest] on neton.quic over loopback UDP (handshake: the TLS test double). */
+class ConnectionLayerTestQuic : ConnectionLayerTest() {
+    override val quic = NETON_QUIC
 }
