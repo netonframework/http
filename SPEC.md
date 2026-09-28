@@ -636,3 +636,19 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   在客户端读到响应前将其丢弃。修正：先按 hyper 关闭写端，再 ⚖️ 排空客户端输入至其关闭，最多 1 s（`closeGracefully`；无半关闭或读超时能力的流
   直接关闭）。修正后该用例在 io_uring 上连续 20 次通过。
 
+
+**HTTP/2：协议层与客户端 / 服务端 API（2026-09-28，h2 0.4.19）**
+- 代码：`neton.http.h2.proto`（`Config`、`FlowControl`、`State`、`Stream`、`Store`、`Buffer`、`Counts`、`Prioritize`、`Send`、`Recv`、`Streams`、`Control`、
+  `Peer`、`Connection`）、`Error`（`H2Error`）、`Share`（`SendStream` / `RecvStream` / `FlowControl` / `PingPong`）、`Protocol`、`client.Client`、
+  `server.Server`；`FramedWrite.hasCapacity` 把空写缓冲视为有空间；`ProtoError` 增加 `BrokenPipe` / `UnexpectedEof`。
+- 运行形态：每连接两个协程（驱动：h2 的 `poll` 去掉读帧，写出并决定关闭；读者：读流、解帧、推进状态机），在各自反应器上；读者在读下一帧前
+  先缓冲该帧引起的控制帧（SETTINGS ACK、PONG、GOAWAY、拒绝），一批帧之后缓冲其引起的重置与 WINDOW_UPDATE，使写出顺序与 h2 的单任务一致，
+  读写互不阻塞；≥ 256 字节的 DATA 负载零复制随帧头一次 writev；不按帧启动协程；流表为按原始流 ID 的开放寻址表。
+- 测试：client_request 45、flow_control 52、server 43、stream_states 34、trailers 5、ping_pong 5、informational_responses 7、push_promise 10、
+  prioritization 7、hammer 1（5000 条 TCP 连接）全部移植（跳过的都是 h2 自身忽略的）；proto 模块内 12 + error.rs 1；另加 TCP 端到端 5、
+  SETTINGS 超时 3、错误信息 2、冒烟 3。约 18 个测试标注 ⚖️ 适配（连接自行运行而非被 poll 驱动）。合计 macOS 1114 个测试（14 个与参考一致地
+  忽略），三次全过；linuxX64 / mingwX64 编译通过。
+- ⚖️：句柄用 `close()` 释放（无析构；丢弃开放流的最后一个句柄会发送重置）；服务端连接由调用方启动的 `run()` 驱动，`accept()` 只取下一个请求；
+  驱动 / 读者两个协程；句柄须在连接的线程上使用（§4.4 要求的跨线程投递尚未实现）；可选 `settingsAckTimeout`（§4.3，默认关闭同参考）；错误类型
+  名 `H2Error`；h2 中 u32 的选项为 `Int`；`poll_*` 成为挂起函数（`awaitCapacity`、`awaitReset`、`informational`、`pushPromise`、`awaitPong`）。
+- 未完成：hyper 的 h2 接线（hyper 的默认值、BDP 自适应窗口、keep-alive ping、头部剥离、CONNECT 隧道）与 h2spec、性能对照。
