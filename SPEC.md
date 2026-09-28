@@ -629,3 +629,10 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   不再启动监视（⚖️ 这类请求的客户端关闭在写出响应时才发现），有测试（无此修正时报"并发读"）。
 - ⚖️ 双跑：`http11UriTooLong`、`headerNameTooLong`、`maxBufSize`、`clientErrorParseTooLarge`、`headerReadTimeoutAsIdleTimeout` 各以放宽的选项按参考
   断言、再以默认值按安全基线断言；`postWithChunkedOverflow` 断言 16 位十六进制上限的错误（参考为溢出）。
+
+**HTTP/1.1：Linux 验收（2026-09-28，153，Rocky 9.8）**
+- http 879 个测试（6 个与参考一致地忽略）在 epoll 与 io_uring 上全过；neton-io 145 个在 epoll / io_uring / poll 上全过。
+- io_uring 上发现：`maxBufSizeSplitHeaderBoundary` 偶发 `ECONNRESET`——自动错误响应后直接关闭，而客户端仍有未读的输入，内核发出的 RST 可能
+  在客户端读到响应前将其丢弃。修正：先按 hyper 关闭写端，再 ⚖️ 排空客户端输入至其关闭，最多 1 s（`closeGracefully`；无半关闭或读超时能力的流
+  直接关闭）。修正后该用例在 io_uring 上连续 20 次通过。
+
