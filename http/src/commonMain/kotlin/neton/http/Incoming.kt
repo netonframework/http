@@ -5,7 +5,7 @@ package neton.http
  * on the client. Reading it reads the connection directly, in the reader's coroutine; nothing is copied into an
  * intermediate buffer and no data is read before it is asked for (backpressure, as hyper's body channel).
  */
-class Incoming internal constructor(private val source: Source?, private val generation: Int, private val exactLength: Long) : Body {
+class Incoming internal constructor(private val source: Source?, private val generation: Int, private val declaredLength: Long) : Body {
 
     /** What an [Incoming] reads from (the connection). */
     internal interface Source {
@@ -22,9 +22,16 @@ class Incoming internal constructor(private val source: Source?, private val gen
     override val sizeHint: SizeHint
         get() {
             if (source == null) return SizeHint.withExact(0)
-            if (exactLength < 0) return SizeHint.DEFAULT
+            if (declaredLength < 0) return SizeHint.DEFAULT
             val r = source.remaining(generation)
             return if (r >= 0) SizeHint.withExact(r) else SizeHint.DEFAULT
+        }
+
+    override val exactLength: Long
+        get() = when {
+            source == null -> 0
+            declaredLength < 0 -> -1
+            else -> source.remaining(generation).let { if (it >= 0) it else -1 }
         }
 
     companion object {

@@ -218,7 +218,7 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         wanting = false
         val request = p.request
         val body: Body = request.body
-        val bodyLen: Long? = if (body.isEndStream) null else body.sizeHint.exact ?: OutgoingBody.UNKNOWN
+        val bodyLen: Long? = if (body.isEndStream) null else body.exactLength.let { if (it < 0) OutgoingBody.UNKNOWN else it }
         val onInformational = request.extensions.get<OnInformational>()
         io.writeLock.withLock { conn.writeHead(request.parts, bodyLen) }
         conn.error?.let { e -> conn.error = null; p.response.completeExceptionally(e); pending = null; return true }

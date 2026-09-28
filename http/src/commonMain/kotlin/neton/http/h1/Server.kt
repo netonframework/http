@@ -259,7 +259,7 @@ class Http1Connection internal constructor(private val stream: IoStream, private
     @Suppress("NOTHING_TO_INLINE")
     private suspend inline fun writeResponse(response: Response<out Body>) {
         val body: Body = response.body
-        val bodyLen: Long? = if (body.isEndStream) null else body.sizeHint.exact ?: OutgoingBody.UNKNOWN
+        val bodyLen: Long? = if (body.isEndStream) null else body.exactLength.let { if (it < 0) OutgoingBody.UNKNOWN else it }
         val status = response.status
         switched = config.upgrades && pendingUpgrade != null &&
             (status.asU16() == 101 || conn.method == Method.CONNECT && status.isSuccess())
