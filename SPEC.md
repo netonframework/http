@@ -711,3 +711,11 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   完整解析的偏移都在已消费范围内；把输入放进更大数组的偏移处结果相同（平移）；完整头部的每个真前缀都是 PARTIAL（增量解析）。
   完整解析的例数设下限（≥ 5%），实测每个目标 1,700–1,840 例以上，防止生成器退化使前缀检查失去意义。未发现缺陷。
   h2 的 3 个目标（client、e2e、hpack）中 hpack 已有（`FuzzTest`），client / e2e 等 hyper 的 h2 接线合入后移植；h3 的 varint 随 HTTP/3。
+- 栈帧清零（2026-09-28，153，callgrind / cachegrind）：
+  - `memset` 约 1,500 Ir/请求，其中 GC 清扫清零已释放单元约 975（随分配数），其余是 K/N 在进入与每次恢复时清零整个函数帧（GC 槽）：
+    `pumpBody` 2.4 KB、`encodeInto` 1.45 KB、`loop` 1.35 KB、`readHead` 1.2 KB、`exchange` 1 KB，以及 neton-io 反应器的 `ensureFd`（472 B，每次读写一次）。
+  - 有效的三处：`pumpBody` 的罕见路径（缓冲满、消息体未就绪、trailer）改为调用（帧 2.4 → 1.1 KB，13,045 → 12,865）；neton-io
+    `ensureFd` 内联检查、增长移出（→ 12,790）；`HeaderMap.forEach` 只在一处调用 action——内联 lambda 此前在每个调用方被复制两份
+    （`encodeInto` 帧 1,448 → 1,192 B，→ 12,642）。复测 12,642 / 12,667 / 12,709：**约 12,670 Ir/请求**（此前 13,050）。
+  - 无效并已撤回：把 `loop` 的 watch / 升级分支与 `exchange` 的服务挂起 / 失败分支移出，帧只减 48 / 32 B，三次测得 12,716–12,766，
+    不优于基线。这两个帧的大小主要不来自这些分支。
