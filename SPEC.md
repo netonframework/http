@@ -274,6 +274,37 @@ com.netonstream:io（IoStream / Framed / Buffer / Bytes / 反应器 / 准入 / �
 | 请求体上限 | 无 | 10 MiB | **10 MiB**（`maxRequestBodySize`） |
 | 上传时的应用缓冲 | 一个读缓冲 + 一个块 | 同 | 同；100 MB 上传测试见 §6 |
 
+### 3.10 在 neton.io 上的落地设计（2026-09-28）
+hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_read` / `poll_write` / `poll_flush`，请求体经通道交给服务）。本库保留全部
+**语义**（状态、边界规则、背压、keep-alive、流水线、错误），实现改为协程顺序代码：
+
+| 模块（`neton.http.h1`） | 对应参考 | 职责 |
+|---|---|---|
+| `parse`（已由 httparse 移植提供） | httparse | 头部字节 → 槽位（偏移），零分配 |
+| `Role`：`ServerRole` / `ClientRole` | `role.rs` | 解析出的槽位 → `MessageHead`（方法 / 目标 / 版本 / `HeaderMap`）+ 消息体长度判定（§3.3 全部规则）；编码出站头部与长度选择 |
+| `BodyDecoder`：Length / Chunked / Eof | `decode.rs` | 从读缓冲取消息体数据与 trailer，严格 CRLF、各项上限（§3.4） |
+| `BodyEncoder`：Length / Chunked / CloseDelimited | `encode.rs` | 数据帧与 trailer 的线格式，chunk 头不分配 |
+| `H1Io` | `io.rs` | 读缓冲（自适应、上限、头部段上限）、写缓冲（头部缓冲 + 队列 / 合并两种策略，经 `IoStream.writev`）、`pipelineFlush` |
+| `H1Conn` | `conn.rs` | 读写两侧状态、keep-alive（Idle / Busy / Disabled）、`enforceVersion`、EOF 分类、100-continue、升级、优雅停机 |
+| `serveHttp1` / `Http1Connection`（服务端）、`Http1Client`（客户端） | `dispatch.rs` + `server/conn/http1.rs` + `client/conn/http1.rs` | 调度循环与对外 API |
+
+- **一个连接一个协程**（neton-io 的连接协程，运行在所属反应器上）：循环 { 读请求头 → 构造 `Request<Incoming>` → 调用服务 → 写响应头 → 逐帧拉取并写出
+  响应体 → keep-alive 判定 }。与 hyper 一样一次处理一个请求，流水线中后续请求的字节留在读缓冲里；参考"每轮至多 16 次后让出"由反应器的任务预算与
+  neton-io §28.4 的轮转保证公平，不另设计数。
+- **请求体 `Incoming`**：服务读取消息体时直接驱动本连接的 `BodyDecoder`（在同一协程里读 `IoStream`），不经通道、不另起协程、不复制到中间缓冲。
+  背压语义与 hyper 相同：服务不读，连接就不从套接字读消息体（hyper 的请求体通道只在接收方"想要"时才读，`body/incoming.rs`）。服务返回时未读完的
+  消息体按 §3.7 处理。`Expect: 100-continue` 在第一次读消息体时写出 100。
+- **响应体**：连接协程循环 `body.nextFrame()`，按 `BodyEncoder` 写出；空数据帧跳过；定长 / chunked / 以关闭界定按 §3.3 的矩阵选择。
+- **超时**：头部读取超时与 keep-alive 空闲超时用 `IoStream` 的读超时（`ReadTimeout` 能力；没有该能力的流拒绝配置这两项，§28.6）；消息体读取可选
+  帧读取速率（neton-io `FrameReadRate` 的同等机制）。
+- **准入**：可选 `Admission`（neton-io §28.12）：等待下一个请求首字节时不持有许可，读到首字节后获取、响应交给写路径后释放。
+- **升级**：`OnUpgrade` 放入扩展；响应 101（或 CONNECT 2xx）写出后，连接把"读缓冲剩余 + 原 `IoStream`"交给 `Upgraded`（本身是 `IoStream`），
+  连接协程结束，不关闭底层流。
+- **客户端**：`Http1Client.handshake(stream)` 返回发送端与连接任务；请求头与请求体的写出和响应的读取并行（hyper 允许服务端提前响应，此时停止发送
+  请求体），用连接作用域内的一个子协程写请求体。
+- **分配**：热路径（解析、查表、编码、chunk 头）零分配；每请求不可避免的对象（`Request`、`HeaderMap` 条目、`HeaderValue`）以 callgrind 实测
+  并记录（§8）。
+
 ## 4. HTTP/2（复刻 `h2` 0.4.19 + hyper 的 h2 接线）
 
 ### 4.1 编解码与帧（`H2/src/codec`、`frame`）
