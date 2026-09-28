@@ -38,7 +38,6 @@ private val EMPTY_INTS = IntArray(0)
 
 /** Ints per entry in [HeaderMap.entryMeta]: hash, first extra value, last extra value. */
 @PublishedApi internal const val META_STRIDE = 3
-private val EMPTY_NAMES = arrayOfNulls<HeaderName>(0)
 private val EMPTY_VALUES = arrayOfNulls<Any?>(0)
 
 /** Returned by the internal insert paths instead of throwing, so both the throwing and the `try*` APIs share them. */
@@ -93,8 +92,8 @@ class HeaderMap<T>() {
     // Entries (`entries: Vec<Bucket<T>>`) as parallel arrays: name, first value, hash, and the head / tail of the list
     // of extra values (-1 when the name has a single value).
     @PublishedApi internal var entryCount: Int = 0
-    @PublishedApi internal var keys: Array<HeaderName?> = EMPTY_NAMES
-    @PublishedApi internal var vals: Array<Any?> = EMPTY_VALUES
+    // Name and first value of entry i at [2 * i] and [2 * i + 1]: one array, allocated once per map instead of two.
+    @PublishedApi internal var kv: Array<Any?> = EMPTY_VALUES
     /**
      * Per entry, [META_STRIDE] ints: the name's hash, the first extra value (link next) and the last extra value (link
      * tail). One array instead of three: a map allocates it once when it gets its first names.
@@ -134,8 +133,7 @@ class HeaderMap<T>() {
 
     /** Clears the map, removing all names and values; keeps the allocated memory and resets the hashing to Green. */
     fun clear() {
-        keys.fill(null, 0, entryCount)
-        vals.fill(null, 0, entryCount)
+        kv.fill(null, 0, 2 * entryCount)
         extraVals.fill(null, 0, extraCount)
         entryCount = 0
         extraCount = 0
@@ -181,13 +179,13 @@ class HeaderMap<T>() {
     /** Returns the first value of [key], or null (`get`; also the reference's `Index`, see [getValue]). */
     operator fun get(key: HeaderName): T? {
         val probe = findProbe(key, null)
-        return if (probe < 0) null else vals[indices[probe] and PROBE_BITS] as T
+        return if (probe < 0) null else kv[2 * (indices[probe] and PROBE_BITS) + 1] as T
     }
 
     /** String form of [get]: matched case-insensitively; an invalid name returns null. Does not allocate. */
     operator fun get(key: String): T? {
         val probe = findProbe(null, key)
-        return if (probe < 0) null else vals[indices[probe] and PROBE_BITS] as T
+        return if (probe < 0) null else kv[2 * (indices[probe] and PROBE_BITS) + 1] as T
     }
 
     /**
@@ -197,14 +195,14 @@ class HeaderMap<T>() {
     fun getValue(key: HeaderName): T {
         val probe = findProbe(key, null)
         if (probe < 0) throw NoSuchElementException("no entry found for key \"$key\"")
-        return vals[indices[probe] and PROBE_BITS] as T
+        return kv[2 * (indices[probe] and PROBE_BITS) + 1] as T
     }
 
     /** String form of [getValue]. */
     fun getValue(key: String): T {
         val probe = findProbe(null, key)
         if (probe < 0) throw NoSuchElementException("no entry found for key \"$key\"")
-        return vals[indices[probe] and PROBE_BITS] as T
+        return kv[2 * (indices[probe] and PROBE_BITS) + 1] as T
     }
 
     /** Returns a view of all values of [key] in insertion order (`get_all`); empty if there are none. */
@@ -354,7 +352,7 @@ class HeaderMap<T>() {
         val idx = indices[probe] and PROBE_BITS
         val head = entryMeta[META_STRIDE * (idx) + 1]
         if (head >= 0) removeAllExtraValues(head)
-        val value = vals[idx]
+        val value = kv[2 * (idx) + 1]
         removeFound(probe, idx)
         return value as T
     }
@@ -381,7 +379,7 @@ class HeaderMap<T>() {
         var i = 0
         var x = -1   // -1: entry i's first value; >= 0: the extra value x of entry i
         while (i < entryCount) {
-            action(keys[i]!!, (if (x < 0) vals[i] else extraVals[x]) as T)
+            action((kv[2 * (i)] as HeaderName?)!!, (if (x < 0) kv[2 * (i) + 1] else extraVals[x]) as T)
             if (modCount != expected) throw ConcurrentModificationException()
             x = if (x < 0) entryMeta[META_STRIDE * i + 1] else extraNext[x]
             if (x < 0) i++
@@ -405,9 +403,8 @@ class HeaderMap<T>() {
      * returns: the iterator owns the removed storage and the map keeps its index table for reuse.
      */
     fun drain(): Drain<T> {
-        val d = Drain<T>(keys, vals, entryMeta, extraVals, extraNext, entryCount, extraCount)
-        keys = EMPTY_NAMES
-        vals = EMPTY_VALUES
+        val d = Drain<T>(kv, entryMeta, extraVals, extraNext, entryCount, extraCount)
+        kv = EMPTY_VALUES
         entryMeta = EMPTY_INTS
         extraVals = EMPTY_VALUES
         extraPrev = EMPTY_INTS
@@ -436,13 +433,12 @@ class HeaderMap<T>() {
     fun extend(other: HeaderMap<T>) {
         if (other === this) return // replacing every name by its own values is a no-op
         reserveForExtend(other.entryCount)
-        val otherKeys = other.keys
-        val otherVals = other.vals
+        val otherKv = other.kv
         val otherMeta = other.entryMeta
         val otherExtraVals = other.extraVals
         val otherExtraNext = other.extraNext
         for (i in 0 until other.entryCount) {
-            val idx = entryForExtend(otherKeys[i]!!, otherVals[i] as T)
+            val idx = entryForExtend(otherKv[2 * i] as HeaderName, otherKv[2 * i + 1] as T)
             var x = otherMeta[META_STRIDE * (i) + 1]
             while (x >= 0) {
                 appendValue(idx, otherExtraVals[x] as T)
@@ -513,10 +509,10 @@ class HeaderMap<T>() {
         if (other !is HeaderMap<*>) return false
         if (len() != other.len()) return false
         for (i in 0 until entryCount) {
-            val probe = other.findProbe(keys[i], null)
+            val probe = other.findProbe((kv[2 * (i)] as HeaderName?), null)
             if (probe < 0) return false
             val j = other.indices[probe] and PROBE_BITS
-            if (vals[i] != other.vals[j]) return false
+            if (kv[2 * (i) + 1] != other.kv[2 * (j) + 1]) return false
             var a = entryMeta[META_STRIDE * (i) + 1]
             var b = other.entryMeta[META_STRIDE * (j) + 1]
             while (a >= 0 && b >= 0) {
@@ -533,7 +529,7 @@ class HeaderMap<T>() {
     override fun hashCode(): Int {
         var h = 0
         for (i in 0 until entryCount) {
-            var e = 31 * keys[i]!!.hash + vals[i].hashCode()
+            var e = 31 * (kv[2 * (i)] as HeaderName?)!!.hash + kv[2 * (i) + 1].hashCode()
             var x = entryMeta[META_STRIDE * (i) + 1]
             while (x >= 0) {
                 e = 31 * e + extraVals[x].hashCode()
@@ -564,8 +560,7 @@ class HeaderMap<T>() {
         m.mask = mask
         m.indices = indices.copyOf()
         m.entryCount = entryCount
-        m.keys = keys.copyOf()
-        m.vals = vals.copyOf()
+        m.kv = kv.copyOf()
         m.entryMeta = entryMeta.copyOf()
         m.extraCount = extraCount
         m.extraVals = extraVals.copyOf()
@@ -620,7 +615,7 @@ class HeaderMap<T>() {
             val entryHash = p ushr 16
             // Give up when the probe distance is longer than the resident's.
             if (dist > ((probe - entryHash) and m)) return -1
-            if (entryHash == hash && matches(keys[p and PROBE_BITS]!!, name, str)) return probe
+            if (entryHash == hash && matches((kv[2 * (p and PROBE_BITS)] as HeaderName?)!!, name, str)) return probe
             dist++
             probe = (probe + 1) and m
         }
@@ -647,7 +642,7 @@ class HeaderMap<T>() {
                 return probe or KIND_ROBINHOOD or
                     (if (dist >= FORWARD_SHIFT_THRESHOLD && notRed) DANGER_FLAG else 0)
             }
-            if (entryHash == hash && matches(keys[p and PROBE_BITS]!!, name, str)) return probe or KIND_OCCUPIED
+            if (entryHash == hash && matches((kv[2 * (p and PROBE_BITS)] as HeaderName?)!!, name, str)) return probe or KIND_OCCUPIED
             dist++
             probe = (probe + 1) and m
         }
@@ -755,16 +750,16 @@ class HeaderMap<T>() {
     internal fun insertOccupied(index: Int, value: T): T {
         val head = entryMeta[META_STRIDE * (index) + 1]
         if (head >= 0) removeAllExtraValues(head)
-        val old = vals[index]
-        vals[index] = value
+        val old = kv[2 * (index) + 1]
+        kv[2 * (index) + 1] = value
         modCount++
         return old as T
     }
 
     /** `insert_occupied_mult`: like [insertOccupied] but returns every previous value. */
     internal fun insertOccupiedMult(index: Int, value: T): ValueDrain<T> {
-        val old = vals[index]
-        vals[index] = value
+        val old = kv[2 * (index) + 1]
+        kv[2 * (index) + 1] = value
         val extras = drainExtraValues(index)
         modCount++
         return ValueDrain(old as T, extras)
@@ -812,19 +807,18 @@ class HeaderMap<T>() {
 
     @Suppress("NOTHING_TO_INLINE")
     private inline fun pushEntry(hash: Int, key: HeaderName, value: T) {
-        if (entryCount == keys.size) resizeEntries(maxOf(capacity(), entryCount * 2, 8))
+        if (2 * entryCount == kv.size) resizeEntries(maxOf(capacity(), entryCount * 2, 8))
         val i = entryCount++
-        keys[i] = key
-        vals[i] = value
+        kv[2 * (i)] = key
+        kv[2 * (i) + 1] = value
         entryMeta[META_STRIDE * (i)] = hash
         entryMeta[META_STRIDE * (i) + 1] = -1
         entryMeta[META_STRIDE * (i) + 2] = -1
     }
 
     private fun resizeEntries(size: Int) {
-        if (keys.size >= size) return
-        keys = keys.copyOf(size)
-        vals = vals.copyOf(size)
+        if (kv.size >= 2 * size) return
+        kv = kv.copyOf(2 * size)
         entryMeta = entryMeta.copyOf(size * META_STRIDE)
     }
 
@@ -847,14 +841,14 @@ class HeaderMap<T>() {
         idx[probe] = -1
         val last = entryCount - 1
         if (found != last) {
-            keys[found] = keys[last]
-            vals[found] = vals[last]
+            kv[2 * (found)] = (kv[2 * (last)] as HeaderName?)
+            kv[2 * (found) + 1] = kv[2 * (last) + 1]
             entryMeta[META_STRIDE * (found)] = entryMeta[META_STRIDE * (last)]
             entryMeta[META_STRIDE * (found) + 1] = entryMeta[META_STRIDE * (last) + 1]
             entryMeta[META_STRIDE * (found) + 2] = entryMeta[META_STRIDE * (last) + 2]
         }
-        keys[last] = null
-        vals[last] = null
+        kv[2 * (last)] = null
+        kv[2 * (last) + 1] = null
         entryCount = last
 
         if (found < entryCount) {
@@ -999,7 +993,7 @@ class HeaderMap<T>() {
         val idx = indices
         val m = mask
         outer@ for (index in 0 until entryCount) {
-            val hash = hashKey(keys[index], null)
+            val hash = hashKey((kv[2 * (index)] as HeaderName?), null)
             entryMeta[META_STRIDE * (index)] = hash
             var probe = hash and m
             var dist = 0
@@ -1088,17 +1082,17 @@ class HeaderMap<T>() {
         }
 
         internal fun lastValue(): T =
-            (if (lastExtra < 0) map.vals[lastEntry] else map.extraVals[lastExtra]) as T
+            (if (lastExtra < 0) map.kv[2 * (lastEntry) + 1] else map.extraVals[lastExtra]) as T
 
         internal fun setLast(value: T) {
             if (map.modCount != expected) throw ConcurrentModificationException()
             check(lastEntry >= 0) { "next() has not been called" }
-            if (lastExtra < 0) map.vals[lastEntry] = value else map.extraVals[lastExtra] = value
+            if (lastExtra < 0) map.kv[2 * (lastEntry) + 1] = value else map.extraVals[lastExtra] = value
         }
 
         override fun next(): Pair<HeaderName, T> {
             advance()
-            return Pair(map.keys[lastEntry]!!, lastValue())
+            return Pair((map.kv[2 * (lastEntry)] as HeaderName?)!!, lastValue())
         }
     }
 
@@ -1136,7 +1130,7 @@ class HeaderMap<T>() {
 
         override fun next(): HeaderName {
             if (!hasNext()) throw NoSuchElementException()
-            return map.keys[i++]!!
+            return (map.kv[2 * (i++)] as HeaderName?)!!
         }
     }
 
@@ -1145,8 +1139,7 @@ class HeaderMap<T>() {
      * its other values with a null name. Owns the removed storage, so it stays valid whatever happens to the map.
      */
     class Drain<T> internal constructor(
-        private val keys: Array<HeaderName?>,
-        private val vals: Array<Any?>,
+        private val kv: Array<Any?>,
         private val entryMeta: IntArray,
         private val extraVals: Array<Any?>,
         private val extraNext: IntArray,
@@ -1175,10 +1168,10 @@ class HeaderMap<T>() {
             }
             if (idx == len) throw NoSuchElementException()
             val i = idx++
-            val key = keys[i]
-            val v = vals[i]
-            keys[i] = null
-            vals[i] = null
+            val key = (kv[2 * (i)] as HeaderName?)
+            val v = kv[2 * (i) + 1]
+            kv[2 * (i)] = null
+            kv[2 * (i) + 1] = null
             nextExtra = entryMeta[META_STRIDE * (i) + 1]
             return Pair(key, v as T)
         }
@@ -1300,13 +1293,13 @@ class HeaderMap<T>() {
         }
 
         private fun slotValue(slot: Int): T =
-            (if (slot == CURSOR_HEAD) map.vals[index] else map.extraVals[slot]) as T
+            (if (slot == CURSOR_HEAD) map.kv[2 * (index) + 1] else map.extraVals[slot]) as T
 
         internal fun setLast(value: T) {
             if (map.modCount != expected) throw ConcurrentModificationException()
             val s = lastSlot
             check(s != CURSOR_NONE) { "next() has not been called" }
-            if (s == CURSOR_HEAD) map.vals[index] = value else map.extraVals[s] = value
+            if (s == CURSOR_HEAD) map.kv[2 * (index) + 1] = value else map.extraVals[s] = value
         }
     }
 
@@ -1487,13 +1480,13 @@ sealed class Entry<T> {
 
         override fun key(): HeaderName {
             checkValid()
-            return map.keys[index]!!
+            return (map.kv[2 * (index)] as HeaderName?)!!
         }
 
         /** Returns the first value (`get`). */
         fun get(): T {
             checkValid()
-            return map.vals[index] as T
+            return map.kv[2 * (index) + 1] as T
         }
 
         /**
@@ -1502,7 +1495,7 @@ sealed class Entry<T> {
          */
         fun set(value: T) {
             checkValid()
-            map.vals[index] = value
+            map.kv[2 * (index) + 1] = value
         }
 
         /** Replaces all values with [value]; returns the previous first value (`insert`). */
@@ -1536,8 +1529,8 @@ sealed class Entry<T> {
             checkValid()
             val head = map.entryMeta[META_STRIDE * (index) + 1]
             if (head >= 0) map.removeAllExtraValues(head)
-            val key = map.keys[index]!!
-            val value = map.vals[index] as T
+            val key = (map.kv[2 * (index)] as HeaderName?)!!
+            val value = map.kv[2 * (index) + 1] as T
             map.removeFound(probe, index)
             consumed = true
             return Pair(key, value)
@@ -1547,8 +1540,8 @@ sealed class Entry<T> {
         fun removeEntryMult(): Pair<HeaderName, HeaderMap.ValueDrain<T>> {
             checkValid()
             val extras = map.drainExtraValues(index)
-            val key = map.keys[index]!!
-            val value = map.vals[index] as T
+            val key = (map.kv[2 * (index)] as HeaderName?)!!
+            val value = map.kv[2 * (index) + 1] as T
             map.removeFound(probe, index)
             consumed = true
             return Pair(key, HeaderMap.ValueDrain(value, extras))
