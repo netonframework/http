@@ -771,4 +771,13 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 - URI 以字节为底的评估（2026-09-28，暂不做）：把请求目标保留为字节、按需生成 String，只对从不读取 `uri.path` 的服务省去解码；几乎所有
   真实服务都按路径路由，而 K/N 的 `String` 必然分配并解码，成本只是推迟到首次访问。hyper 能省是因为 `path()` 返回 `&str` 切片，K/N 做不到。
   真正的节省需要按字节路由的接口，超出参考范围；保持现状。
+- 双传输运行（§6 "所有测试同时用 memoryStreamPair 与真实 TCP 运行"，2026-09-28）：测试经 `testStreamPair` 取连接，
+  `NETON_HTTP_TEST_TRANSPORT=tcp` 时改为回环 TCP（监听端口 0、连接、接受）。两种模式全量通过（153：内存 / TCP × epoll / io_uring 四种组合各 1,197 个，14 个忽略，0 失败；macOS 两种模式各 1,196）；TCP 下未发现库缺陷，h1 测试原样通过。
+  - 修正一处测试时序：`h2_pipe_task_cancelled_on_response_future_drop` 先等客户端应用服务端 SETTINGS（初始窗口 0）再发送；
+    TCP 下客户端曾在 SETTINGS 到达前按默认窗口发出消息体。断言不变。
+  - **例外（§6 未完全满足）**：h2 `mock.rs` 移植的约 190 个用例保持内存传输。参考 mock 在下一次 poll 即交付字节，用例断言由此而来的
+    帧顺序（如 SETTINGS ACK 先于首个 HEADERS、`accept` 返回时 DATA 已读完、带未读字节关闭为干净 EOF）；neton-io 的就绪反应器在首个
+    就绪事件前不读新连接、每轮每连接至多读一次，TCP 下这些顺序（HTTP/2 允许的其他顺序）无法确定化，不削弱断言就无法迁移。
+    这些库路径在 TCP 上另由 hyper 层 HTTP/2 用例、`TcpEndToEndTest`、`HammerTest` 与 h2spec 覆盖。
+    另 `timeoutsNeedReadTimeoutCapability` 断言的是无 ReadTimeout 能力的流，TCP 流有此能力，保持内存传输。
 
