@@ -35,6 +35,9 @@ internal const val CURSOR_NONE: Int = -2
 internal const val CURSOR_HEAD: Int = -1
 
 private val EMPTY_INTS = IntArray(0)
+
+/** Ints per entry in [HeaderMap.entryMeta]: hash, first extra value, last extra value. */
+@PublishedApi internal const val META_STRIDE = 3
 private val EMPTY_NAMES = arrayOfNulls<HeaderName>(0)
 private val EMPTY_VALUES = arrayOfNulls<Any?>(0)
 
@@ -92,9 +95,11 @@ class HeaderMap<T>() {
     @PublishedApi internal var entryCount: Int = 0
     @PublishedApi internal var keys: Array<HeaderName?> = EMPTY_NAMES
     @PublishedApi internal var vals: Array<Any?> = EMPTY_VALUES
-    internal var entryHash: IntArray = EMPTY_INTS
-    @PublishedApi internal var linkNext: IntArray = EMPTY_INTS
-    internal var linkTail: IntArray = EMPTY_INTS
+    /**
+     * Per entry, [META_STRIDE] ints: the name's hash, the first extra value (link next) and the last extra value (link
+     * tail). One array instead of three: a map allocates it once when it gets its first names.
+     */
+    @PublishedApi internal var entryMeta: IntArray = EMPTY_INTS
 
     // Extra values (`extra_values: Vec<ExtraValue<T>>`), a doubly linked list per name. A link >= 0 is an extra
     // value index (`Link::Extra`), a link < 0 is `inv()` of an entry index (`Link::Entry`).
@@ -347,7 +352,7 @@ class HeaderMap<T>() {
     private fun removeAt(probe: Int): T? {
         if (probe < 0) return null
         val idx = indices[probe] and PROBE_BITS
-        val head = linkNext[idx]
+        val head = entryMeta[META_STRIDE * (idx) + 1]
         if (head >= 0) removeAllExtraValues(head)
         val value = vals[idx]
         removeFound(probe, idx)
@@ -376,7 +381,7 @@ class HeaderMap<T>() {
             val name = keys[i]!!
             action(name, vals[i] as T)
             if (modCount != expected) throw ConcurrentModificationException()
-            var x = linkNext[i]
+            var x = entryMeta[META_STRIDE * (i) + 1]
             while (x >= 0) {
                 action(name, extraVals[x] as T)
                 if (modCount != expected) throw ConcurrentModificationException()
@@ -403,12 +408,10 @@ class HeaderMap<T>() {
      * returns: the iterator owns the removed storage and the map keeps its index table for reuse.
      */
     fun drain(): Drain<T> {
-        val d = Drain<T>(keys, vals, linkNext, extraVals, extraNext, entryCount, extraCount)
+        val d = Drain<T>(keys, vals, entryMeta, extraVals, extraNext, entryCount, extraCount)
         keys = EMPTY_NAMES
         vals = EMPTY_VALUES
-        entryHash = EMPTY_INTS
-        linkNext = EMPTY_INTS
-        linkTail = EMPTY_INTS
+        entryMeta = EMPTY_INTS
         extraVals = EMPTY_VALUES
         extraPrev = EMPTY_INTS
         extraNext = EMPTY_INTS
@@ -438,12 +441,12 @@ class HeaderMap<T>() {
         reserveForExtend(other.entryCount)
         val otherKeys = other.keys
         val otherVals = other.vals
-        val otherNext = other.linkNext
+        val otherMeta = other.entryMeta
         val otherExtraVals = other.extraVals
         val otherExtraNext = other.extraNext
         for (i in 0 until other.entryCount) {
             val idx = entryForExtend(otherKeys[i]!!, otherVals[i] as T)
-            var x = otherNext[i]
+            var x = otherMeta[META_STRIDE * (i) + 1]
             while (x >= 0) {
                 appendValue(idx, otherExtraVals[x] as T)
                 x = otherExtraNext[x]
@@ -517,8 +520,8 @@ class HeaderMap<T>() {
             if (probe < 0) return false
             val j = other.indices[probe] and PROBE_BITS
             if (vals[i] != other.vals[j]) return false
-            var a = linkNext[i]
-            var b = other.linkNext[j]
+            var a = entryMeta[META_STRIDE * (i) + 1]
+            var b = other.entryMeta[META_STRIDE * (j) + 1]
             while (a >= 0 && b >= 0) {
                 if (extraVals[a] != other.extraVals[b]) return false
                 a = extraNext[a]
@@ -534,7 +537,7 @@ class HeaderMap<T>() {
         var h = 0
         for (i in 0 until entryCount) {
             var e = 31 * keys[i]!!.hash + vals[i].hashCode()
-            var x = linkNext[i]
+            var x = entryMeta[META_STRIDE * (i) + 1]
             while (x >= 0) {
                 e = 31 * e + extraVals[x].hashCode()
                 x = extraNext[x]
@@ -566,9 +569,7 @@ class HeaderMap<T>() {
         m.entryCount = entryCount
         m.keys = keys.copyOf()
         m.vals = vals.copyOf()
-        m.entryHash = entryHash.copyOf()
-        m.linkNext = linkNext.copyOf()
-        m.linkTail = linkTail.copyOf()
+        m.entryMeta = entryMeta.copyOf()
         m.extraCount = extraCount
         m.extraVals = extraVals.copyOf()
         m.extraPrev = extraPrev.copyOf()
@@ -750,7 +751,7 @@ class HeaderMap<T>() {
 
     /** Replaces the first value of entry [index] and removes the others (`insert_occupied`); returns the old one. */
     internal fun insertOccupied(index: Int, value: T): T {
-        val head = linkNext[index]
+        val head = entryMeta[META_STRIDE * (index) + 1]
         if (head >= 0) removeAllExtraValues(head)
         val old = vals[index]
         vals[index] = value
@@ -773,7 +774,7 @@ class HeaderMap<T>() {
      * first.)
      */
     internal fun drainExtraValues(index: Int): Array<Any?>? {
-        var head = linkNext[index]
+        var head = entryMeta[META_STRIDE * (index) + 1]
         if (head < 0) return null
         var n = 0
         var x = head
@@ -792,17 +793,17 @@ class HeaderMap<T>() {
         if (extraCount == extraVals.size) growExtras()
         val idx = extraCount++
         extraVals[idx] = value
-        val tail = linkTail[entryIdx]
-        if (linkNext[entryIdx] >= 0) {
+        val tail = entryMeta[META_STRIDE * (entryIdx) + 2]
+        if (entryMeta[META_STRIDE * (entryIdx) + 1] >= 0) {
             extraPrev[idx] = tail
             extraNext[idx] = entryIdx.inv()
             extraNext[tail] = idx
-            linkTail[entryIdx] = idx
+            entryMeta[META_STRIDE * (entryIdx) + 2] = idx
         } else {
             extraPrev[idx] = entryIdx.inv()
             extraNext[idx] = entryIdx.inv()
-            linkNext[entryIdx] = idx
-            linkTail[entryIdx] = idx
+            entryMeta[META_STRIDE * (entryIdx) + 1] = idx
+            entryMeta[META_STRIDE * (entryIdx) + 2] = idx
         }
         modCount++
     }
@@ -812,18 +813,16 @@ class HeaderMap<T>() {
         val i = entryCount++
         keys[i] = key
         vals[i] = value
-        entryHash[i] = hash
-        linkNext[i] = -1
-        linkTail[i] = -1
+        entryMeta[META_STRIDE * (i)] = hash
+        entryMeta[META_STRIDE * (i) + 1] = -1
+        entryMeta[META_STRIDE * (i) + 2] = -1
     }
 
     private fun resizeEntries(size: Int) {
         if (keys.size >= size) return
         keys = keys.copyOf(size)
         vals = vals.copyOf(size)
-        entryHash = entryHash.copyOf(size)
-        linkNext = linkNext.copyOf(size)
-        linkTail = linkTail.copyOf(size)
+        entryMeta = entryMeta.copyOf(size * META_STRIDE)
     }
 
     private fun growExtras() {
@@ -847,9 +846,9 @@ class HeaderMap<T>() {
         if (found != last) {
             keys[found] = keys[last]
             vals[found] = vals[last]
-            entryHash[found] = entryHash[last]
-            linkNext[found] = linkNext[last]
-            linkTail[found] = linkTail[last]
+            entryMeta[META_STRIDE * (found)] = entryMeta[META_STRIDE * (last)]
+            entryMeta[META_STRIDE * (found) + 1] = entryMeta[META_STRIDE * (last) + 1]
+            entryMeta[META_STRIDE * (found) + 2] = entryMeta[META_STRIDE * (last) + 2]
         }
         keys[last] = null
         vals[last] = null
@@ -857,7 +856,7 @@ class HeaderMap<T>() {
 
         if (found < entryCount) {
             // Fix the position that points to the moved entry (its old index is `entryCount` now).
-            val h = entryHash[found]
+            val h = entryMeta[META_STRIDE * (found)]
             var p = h and m
             while (true) {
                 val pos = idx[p]
@@ -867,10 +866,10 @@ class HeaderMap<T>() {
                 }
                 p = (p + 1) and m
             }
-            val head = linkNext[found]
+            val head = entryMeta[META_STRIDE * (found) + 1]
             if (head >= 0) {
                 extraPrev[head] = found.inv()
-                extraNext[linkTail[found]] = found.inv()
+                extraNext[entryMeta[META_STRIDE * (found) + 2]] = found.inv()
             }
         }
 
@@ -898,13 +897,13 @@ class HeaderMap<T>() {
         // Unlink.
         if (prev < 0 && next < 0) {
             val e = prev.inv()
-            linkNext[e] = -1
-            linkTail[e] = -1
+            entryMeta[META_STRIDE * (e) + 1] = -1
+            entryMeta[META_STRIDE * (e) + 2] = -1
         } else if (prev < 0) {
-            linkNext[prev.inv()] = next
+            entryMeta[META_STRIDE * (prev.inv()) + 1] = next
             extraPrev[next] = prev
         } else if (next < 0) {
-            linkTail[next.inv()] = prev
+            entryMeta[META_STRIDE * (next.inv()) + 2] = prev
             extraNext[prev] = next
         } else {
             extraNext[prev] = next
@@ -929,8 +928,8 @@ class HeaderMap<T>() {
         if (idx != oldIdx) {
             val mp = extraPrev[idx]
             val mn = extraNext[idx]
-            if (mp < 0) linkNext[mp.inv()] = idx else extraNext[mp] = idx
-            if (mn < 0) linkTail[mn.inv()] = idx else extraPrev[mn] = idx
+            if (mp < 0) entryMeta[META_STRIDE * (mp.inv()) + 1] = idx else extraNext[mp] = idx
+            if (mn < 0) entryMeta[META_STRIDE * (mn.inv()) + 2] = idx else extraPrev[mn] = idx
         }
         removedNext = fixedNext
         modCount++
@@ -994,7 +993,7 @@ class HeaderMap<T>() {
         val m = mask
         outer@ for (index in 0 until entryCount) {
             val hash = hashKey(keys[index], null)
-            entryHash[index] = hash
+            entryMeta[META_STRIDE * (index)] = hash
             var probe = hash and m
             var dist = 0
             while (true) {
@@ -1072,7 +1071,7 @@ class HeaderMap<T>() {
             lastEntry = entry
             if (cursor == CURSOR_HEAD) {
                 lastExtra = -1
-                val next = map.linkNext[entry]
+                val next = map.entryMeta[META_STRIDE * (entry) + 1]
                 cursor = if (next >= 0) next else CURSOR_NONE
             } else {
                 lastExtra = cursor
@@ -1141,7 +1140,7 @@ class HeaderMap<T>() {
     class Drain<T> internal constructor(
         private val keys: Array<HeaderName?>,
         private val vals: Array<Any?>,
-        private val linkNext: IntArray,
+        private val entryMeta: IntArray,
         private val extraVals: Array<Any?>,
         private val extraNext: IntArray,
         private val len: Int,
@@ -1173,7 +1172,7 @@ class HeaderMap<T>() {
             val v = vals[i]
             keys[i] = null
             vals[i] = null
-            nextExtra = linkNext[i]
+            nextExtra = entryMeta[META_STRIDE * (i) + 1]
             return Pair(key, v as T)
         }
     }
@@ -1226,8 +1225,8 @@ class HeaderMap<T>() {
         init {
             if (index >= 0) {
                 front = CURSOR_HEAD
-                val tail = map.linkNext[index]
-                back = if (tail >= 0) map.linkTail[index] else CURSOR_HEAD
+                val tail = map.entryMeta[META_STRIDE * (index) + 1]
+                back = if (tail >= 0) map.entryMeta[META_STRIDE * (index) + 2] else CURSOR_HEAD
             } else {
                 front = CURSOR_NONE
                 back = CURSOR_NONE
@@ -1249,7 +1248,7 @@ class HeaderMap<T>() {
                         front = CURSOR_NONE
                         back = CURSOR_NONE
                     } else {
-                        front = map.linkNext[index]
+                        front = map.entryMeta[META_STRIDE * (index) + 1]
                     }
                 }
                 else -> {
@@ -1528,7 +1527,7 @@ sealed class Entry<T> {
         /** Removes the name and all its values; returns the name and the first value (`remove_entry`). */
         fun removeEntry(): Pair<HeaderName, T> {
             checkValid()
-            val head = map.linkNext[index]
+            val head = map.entryMeta[META_STRIDE * (index) + 1]
             if (head >= 0) map.removeAllExtraValues(head)
             val key = map.keys[index]!!
             val value = map.vals[index] as T
