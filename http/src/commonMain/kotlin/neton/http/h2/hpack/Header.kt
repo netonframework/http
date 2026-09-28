@@ -149,9 +149,13 @@ internal fun makeHeader(kind: Int, name: HeaderName?, value: Any): Header = when
 
 /** Number of UTF-8 bytes of [s], without encoding it. */
 internal fun utf8Length(s: String): Int {
-    var n = 0
-    var i = 0
+    // ASCII (every pseudo-header value in practice) with one compare per char; the classification below from the
+    // first non-ASCII char on.
     val len = s.length
+    var i = 0
+    while (i < len && s[i].code < 0x80) i++
+    if (i == len) return len
+    var n = i
     while (i < len) {
         val c = s[i].code
         when {
