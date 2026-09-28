@@ -504,8 +504,9 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
         flushLocked()
     }
 
-    /** [flush] holding the write lock; one suspending layer on the per-response path. */
-    suspend fun flushLocked() {
+    /** [flush] holding the write lock; inline, so no suspending layer of its own on the per-response path. */
+    @Suppress("NOTHING_TO_INLINE")
+    suspend inline fun flushLocked() {
         io.writeLock.lock()
         try {
             io.flush()

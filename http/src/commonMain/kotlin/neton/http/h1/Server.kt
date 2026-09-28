@@ -254,7 +254,9 @@ class Http1Connection internal constructor(private val stream: IoStream, private
         return false
     }
 
-    private suspend fun writeResponse(response: Response<out Body>) {
+    // Inline into [exchange]: one continuation less per request.
+    @Suppress("NOTHING_TO_INLINE")
+    private suspend inline fun writeResponse(response: Response<out Body>) {
         val body: Body = response.body
         val bodyLen: Long? = if (body.isEndStream) null else body.sizeHint.exact ?: OutgoingBody.UNKNOWN
         val status = response.status

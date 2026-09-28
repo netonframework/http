@@ -23,7 +23,7 @@ fun main(args: Array<String>) {
     println("helloServer on $host:$port reactors=$reactors pipelineFlush=$pipelineFlush")
     serveTcp(host, port, reactors = reactors, shutdownOnSignals = true) { stream ->
         runCatching {
-            config.serveConnection(stream) { Response.builder().body(FullBody(hello) as Body) }.serve()
+            config.serveConnection(stream) { Response<Body>(FullBody(hello)) }.serve()   // hyper: Response::new(Full::new(..))
         }
     }
 }
