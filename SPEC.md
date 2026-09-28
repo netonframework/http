@@ -416,6 +416,25 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 
 ## 5. HTTP/3（复刻 `h3` 0.0.8，在 `neton.quic` 上）
 
+> **状态：计划范围，尚未实现（2026-09-29）。** 本节的 ✅ 表示"已与参考对照、决定照做"，不表示已实现；实现进度见 §11。
+> 依赖的 QUIC 仍以 TLS 测试替身运行（quic SPEC §11.5–11.8），真实 TLS 未接入；HTTP/3 的最终验收以真实 QUIC 与外部 HTTP/3 实现互通为准。
+
+- **首版范围（评审确定，2026-09-29）**：
+  - 客户端与服务端；普通请求、流式消息体、trailer、取消（请求流 reset / stop）、GOAWAY 与优雅关闭。
+  - QPACK：编码只用静态表与字面量（含霍夫曼），**通告动态表容量为 0**；解码遇到动态引用 → QPACK_DECOMPRESSION_FAILED。编码器 / 解码器
+    单向流**照常打开并读取**，其上的指令按协议校验（超出容量的插入 → QPACK_ENCODER_STREAM_ERROR；Insert Count Increment 为 0 →
+    QPACK_DECODER_STREAM_ERROR），不得忽略这两条流。
+  - 关键流（控制流、QPACK 编码器 / 解码器流）被关闭或复位 → H3_CLOSED_CRITICAL_STREAM 关闭整个连接；普通请求流的取消只影响该请求。
+  - 请求流被阻塞（对端不读、流量控制）时，控制流与其他请求流仍须推进。
+- **首版不做**：0-RTT、服务端推送（PUSH_PROMISE 只解析、按参考忽略 MAX_PUSH_ID / CANCEL_PUSH）、WebTransport、HTTP Datagram（RFC 9297）、
+  动态 QPACK。下文中 h3-datagram / h3-webtransport 一项随之移出首版。
+- **开发与验收分层**：
+  1. 纯编解码（varint、帧、QPACK 静态 + 字面量、SETTINGS）与状态机（控制流、请求流、GOAWAY、错误映射）：输入字节 / 事件驱动测试，不依赖 QUIC。
+  2. 连接层接在一个薄的 QUIC 接口上；测试用内存中的流对替身，覆盖多流协调、取消、慢消费者、资源上限。
+  3. 接到 `neton.quic`（当前握手为 TLS 测试替身）做端到端测试。
+  4. 最终验收（真实 TLS 到位后）：与外部 HTTP/3 实现双向互通（如 curl `--http3`、quiche / nghttp3 / quinn-h3 的客户端与服务端）与 h3spec；
+     **quinn 的 QUIC 互通不等于 HTTP/3 互通**，两者分别验收。
+
 - **QUIC 接口**：参考以 trait 抽象 QUIC（`H3/h3/src/quic.rs`：`Connection`、`OpenStreams`、`SendStream`、`RecvStream`、`BidiStream`），由 h3-quinn 适配。本库直接使用 `neton.quic` 的连接与流 ⚖️，另保留一层薄接口，以便测试时替换。
 - **帧**：DATA、HEADERS、CANCEL_PUSH、SETTINGS、PUSH_PROMISE、GOAWAY、MAX_PUSH_ID、WEBTRANSPORT_BI_STREAM ✅。
   - HTTP/2 专有类型 → H3_FRAME_UNEXPECTED；未知类型与 GREASE 帧跳过。
@@ -434,12 +453,13 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   - 服务端第一帧必须是 HEADERS；头部过大时自动回 431；格式错误 → H3_MESSAGE_ERROR。
   - 消息体为 DATA，随后可有作为 trailer 的 HEADERS。
   - `finish` 前每个连接发送一个 GREASE 帧。
-- **GOAWAY** ✅：
-  - 服务端 `shutdown(maxRequests)`；ID 大于 GOAWAY 的请求 → H3_REQUEST_REJECTED。
+- **GOAWAY** ⚖️：
+  - 服务端 `shutdown(maxRequests)`；**ID 大于或等于** GOAWAY 所带 ID 的请求 → H3_REQUEST_REJECTED（RFC 9114 §5.2：GOAWAY 携带的是第一个
+    不会处理的流 ID）。参考 h3 0.0.8 写作 `send_id() > max_id`，会接受边界上的请求，影响客户端的安全重试判断；本库按 RFC（评审发现，2026-09-29）。
   - 客户端 `shutdown`。
   - ID 比上次大 → H3_ID_ERROR。
 - **错误码**：H3_DATAGRAM_ERROR、0x100–0x110、QPACK 0x200–0x202 ✅。
-- **h3-datagram（RFC 9297）与 h3-webtransport（仅服务端）**：参考标为实验性，本库同样实验性 ✅。
+- **h3-datagram（RFC 9297）与 h3-webtransport（仅服务端）**：参考标为实验性；**本库首版不做**（见上方首版范围）。
 - **配置**（`config.rs`）：
   - `sendGrease` true ✅；`enableExtendedConnect` / `enableWebtransport` / `enableDatagram` false ✅；`maxWebtransportSessions` 0 ✅。
   - **头部的三种上限**（⚖️；参考只有 `max_field_section_size`，默认不设上限）：HEADERS 帧编码后的字节数与 QPACK 解码后的字段段大小是两个不同的量，
