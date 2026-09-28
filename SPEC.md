@@ -416,7 +416,8 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 
 ## 5. HTTP/3（复刻 `h3` 0.0.8，在 `neton.quic` 上）
 
-> **状态：第 1 层（纯编解码，阶段 A）已实现；连接层、QUIC 接入与互通尚未实现（2026-09-29）。** 本节的 ✅ 表示"已与参考对照、决定照做"，
+> **状态：第 1 层（纯编解码，阶段 A）与第 2 层（连接层接在薄 QUIC 接口上、以内存替身测试，阶段 B）已实现；QUIC 接入（阶段 C）与互通
+> （阶段 D）尚未实现（2026-09-29）。** 本节的 ✅ 表示"已与参考对照、决定照做"，
 > 不表示已实现；实现进度见 §11。
 > 依赖的 QUIC 仍以 TLS 测试替身运行（quic SPEC §11.5–11.8），真实 TLS 未接入；HTTP/3 的最终验收以真实 QUIC 与外部 HTTP/3 实现互通为准。
 
@@ -927,3 +928,133 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 - 未决 / 留给第 2 层：HEADERS 过大与两种解码限额在服务端回 431 的具体流程；`Config`（`config.rs`）与本端 SETTINGS 的生成（通告
   SETTINGS_MAX_FIELD_SECTION_SIZE、QPACK 容量 0）；控制流上 SETTINGS 必须为第一帧、帧在各类流上的允许性等流状态规则。
 
+
+**HTTP/3 阶段 B：连接层（2026-09-29，h3 0.0.8，§5 分层验收第 2 层）**
+- 范围：连接层（控制流与 QPACK 流、关键流、请求流、GOAWAY、错误映射、服务端 / 客户端 API）接在一层薄的 QUIC 接口上，以内存 QUIC
+  替身测试。**未做：接入 `com.netonstream:quic`（阶段 C，第 3 层）；与外部 HTTP/3 实现互通与 h3spec（阶段 D，第 4 层，需要真实 TLS）。**
+  本阶段的一切结论只在内存替身上成立。
+- 薄 QUIC 接口（`neton.http.h3.quic`，`quic.rs`）：
+  - `Connection`（`acceptUni`、`acceptBi`、`opener`）、`OpenStreams`（`openBi`、`openUni`、`close(code, reason)`）、`SendStream`（`sendId`、
+    `write(Bytes)`、`finish`、`reset`、`stopped`）、`RecvStream`（`recvId`、`read(): Bytes?`、`stopSending`）、`BidiStream`（`split`）。
+  - ⚖️ 协程形态：`poll_*` 为挂起函数；"会阻塞"（流控、尚无数据）一律挂起，不抛异常。`Result` 改为异常：连接已关闭为
+    `ConnectionErrorIncoming`（ApplicationClose / Timeout / InternalError / Undefined），流操作失败为 `StreamErrorIncoming`（ConnectionLost /
+    StreamTerminated / Unknown），与参考的两个枚举逐项对应。参考的 `send_data` + `poll_ready`（排入一个 `WriteBuf` 再等它发完）合为一个
+    `write`，写完全部字节才返回。
+  - 比参考多一个 `SendStream.stopped()`（等到对端 STOP_SENDING 返回其码，数据处理完返回 null）：不写数据也能发现本端关键流被对端叫停。
+  - 阶段 C 的映射（neton.quic 的 `Connection` / `SendStream` / `RecvStream` 可直接实现）：`openUni` / `openBi` / `acceptUni` / `acceptBi`
+    （一个 `Pair<SendStream, RecvStream>` 即一个 `BidiStream`）；`writeChunk`、`finish`、`reset`、`stopped`；`readChunk` 取其字节（结束为
+    null）、`stop`；`Connection.close(code, reason)`。错误按 h3-quinn 的 `convert_connection_error`：ApplicationClosed → ApplicationClose，
+    TimedOut → Timeout，其余 → Undefined；`WriteError.Stopped` / `ReadError.Reset` → StreamTerminated；`*.ConnectionLost` → ConnectionLost；
+    其他流错误 → Unknown。
+- 内存 QUIC 替身（测试源集 `nativeTest/.../MemoryQuic.kt`，`memoryQuicPair`）：
+  - 两个相连的端点；双向与单向流；FIN；RESET_STREAM（复位前已收到的字节仍可读，其后报复位，同 quinn）；STOP_SENDING（丢弃未读字节，写方报
+    StreamTerminated）。
+  - 每个方向一个有界缓冲（默认 64 KiB，可调）：写满即挂起，直到读方取走——类流控的背压。
+  - 以应用错误码关闭连接（本端报 Undefined(LocallyClosed)，对端报 ApplicationClose，并记录由谁、以何码关闭）；可选空闲超时（双方报 Timeout）。
+  - 与 QUIC 一致：流在打开方第一次发送（数据、FIN 或复位）时才对对端可见；同类流按 ID 顺序被接受（使用流 N 即隐式打开更小的流）。
+  - 替身自身 6 个测试（`MemoryQuicTest`）。替身同步投递、即时关闭；真实 QUIC 上的时序（丢包、乱序、关闭延迟）留给第 3 层。
+- 连接核心（`ConnectionInner`；`connection.rs`、`shared_state.rs`、`config.rs`）：
+  - 启动时依次打开控制流（首帧 SETTINGS）、QPACK 编码器流、QPACK 解码器流并写入流类型；QPACK 两条流打开失败不算错误（同参考）。
+  - 本端 SETTINGS（`Config.toFrame`）：`sendGrease` 时一个 GREASE 设置；SETTINGS_MAX_FIELD_SECTION_SIZE = `maxFieldSectionSize`（默认
+    64 KiB）；ENABLE_CONNECT_PROTOCOL、ENABLE_WEBTRANSPORT、H3_DATAGRAM、WEBTRANSPORT_MAX_SESSIONS 为 0（同参考）。QPACK 最大表容量与
+    阻塞流数为 0，即默认值，不发送。`Config` 另有 `maxHeadersFrameSize`（64 KiB）与 `maxFieldCount`（100），见 §5 头部的三种上限。
+    WebTransport、扩展 CONNECT、Datagram 在构造器上没有开关（⛔ 首版不做），对端的这几项只记录不使用。
+  - ⚖️ 驱动：参考没有驱动任务，谁轮询 `accept` / `poll_close` 谁读控制流，QPACK 两条流接受后从不读取。本库由 `run()` 驱动（与
+    `neton.http.h2.server.Connection.run` 一致，需 launch）：对端每条单向流一个协程，一条流停滞不影响其他；QPACK 两条流照常读取，指令用
+    阶段 A 的 `EncoderStreamReceiver` / `DecoderStreamReceiver` 校验，非法 → QPACK_ENCODER_STREAM_ERROR / QPACK_DECODER_STREAM_ERROR 连接错误。
+  - 单向流：第二条控制 / 编码器 / 解码器流 → H3_STREAM_CREATION_ERROR；未知类型（含 GREASE）→ STOP_SENDING(H3_STREAM_CREATION_ERROR)，
+    不算连接错误；流头到达前关闭或复位的流被容忍（RFC 9114 §6.2）。⚖️ 推送流：参考静默丢弃；首版不做推送，按 RFC：服务端收到 →
+    H3_STREAM_CREATION_ERROR（§6.2.2），客户端收到（从未发送 MAX_PUSH_ID，任何推送 ID 都超限）→ H3_ID_ERROR（§4.6）。
+  - 控制流：SETTINGS 必须是第一帧（否则 H3_MISSING_SETTINGS）且只有一个（第二个 → H3_FRAME_UNEXPECTED）；DATA、HEADERS、PUSH_PROMISE →
+    H3_FRAME_UNEXPECTED；服务端忽略 MAX_PUSH_ID / CANCEL_PUSH，客户端收到二者 → H3_FRAME_UNEXPECTED（均同参考）；帧格式错误按阶段 A 的码
+    （截断 H3_FRAME_ERROR 等）。⚖️ 超过 `maxHeadersFrameSize` 的 HEADERS 在读到帧头时即被拒绝（阶段 A 为 H3_EXCESSIVE_LOAD）；在控制流上
+    HEADERS 本就不允许，故按参考对 HEADERS 的处理报：SETTINGS 之前 H3_MISSING_SETTINGS，之后 H3_FRAME_UNEXPECTED。
+  - 关键流：对端控制流、编码器流、解码器流结束或复位 → H3_CLOSED_CRITICAL_STREAM。⚖️ 对端对本端这三条流发 STOP_SENDING → 同样是
+    H3_CLOSED_CRITICAL_STREAM（RFC 9114 §6.2.1、RFC 9204 §4.2）；参考只在下次写该流时才发现。
+  - 对端 SETTINGS 第一次到达时记录，此后发送头部按其 SETTINGS_MAX_FIELD_SECTION_SIZE 检查；到达之前按 RFC 默认值（不限）。
+  - GREASE（同参考）：每个连接一条保留类型的单向流（保留帧后 FIN）；每个连接的第一条请求流在 `finish` 前发一个保留帧。
+  - ⚖️ 连接错误即时生效：第一个连接错误（无论由连接还是某条流发现）记入共享状态并立即以其码关闭 QUIC 连接；参考要等驱动下次被轮询时
+    （`poll_connection_error`）才关闭。此后所有操作报同一个错误（先到者为准，同参考的 `OnceLock`）。
+  - 并发模型：连接与其流在所属反应器上，共享状态为普通字段、不加锁（§5）；等待用一个单线程的"通知全部"原语（`Notify`）。
+- 请求流（`RequestStreamInner`；`connection.rs` 的 `RequestStream`、`server/`、`client/`）：
+  - 接收：可选的 DATA 帧（到达即交出，不整体缓存），可选的 trailer（一个 HEADERS），其后只允许未知帧；其他已知帧 → H3_FRAME_UNEXPECTED
+    连接错误，截断的帧 → H3_FRAME_ERROR。trailer 要等到流结束（或下一帧）才交出（同参考）。
+  - 收到的头部段逐步按三种上限检查（§5）：HEADERS 帧长在帧头即检查（负载不读），解码大小与字段个数逐行检查；超限为 `StreamError.HeaderTooBig`
+    （流错误，不是连接错误）；其他 QPACK 解码错误 → QPACK_DECOMPRESSION_FAILED 连接错误。
+  - 服务端第一帧必须是 HEADERS（其他帧 → H3_FRAME_UNEXPECTED）；流在头部之前结束 → 复位 H3_REQUEST_INCOMPLETE；格式错误 → 以
+    H3_MESSAGE_ERROR 复位并 STOP_SENDING（同参考）。客户端响应头部：流在其之前结束或首帧不是 HEADERS → H3_FRAME_UNEXPECTED；格式错误或超限
+    → STOP_SENDING(H3_REQUEST_CANCELLED)（同参考）。
+  - ⚖️ 比参考多的检查：content-length（阶段 A 解析）与收到的 DATA 总长核对，多出或结束时不等 → H3_MESSAGE_ERROR 流错误（RFC 9114 §4.1.2；
+    HEAD 请求、1xx / 204 / 304 响应不核对）；trailer 中的伪头部 → H3_MESSAGE_ERROR（参考丢弃伪头部）；请求中的 `:status`，以及未启用扩展
+    CONNECT 时的 `:protocol` → H3_MESSAGE_ERROR（RFC 9220 §3）；空的 DATA 帧不结束消息体（参考的 `poll_data` 对它返回 None）。
+  - ⚖️ 客户端构造请求头失败（如缺少 authority）只让这个请求失败（`StreamError.Stream(H3_INTERNAL_ERROR)`）；参考将其作为 H3_INTERNAL_ERROR
+    连接错误关闭整个连接。
+  - 发送：头部 / trailer 编码后大小超过对端 SETTINGS_MAX_FIELD_SECTION_SIZE → `HeaderTooBig`，不发送（RFC 9114 §4.2.2、§7.2.4.2，同参考）；
+    客户端此时流已打开，按参考（quinn 丢弃流时 FIN）结束这条空流，服务端于是看到 H3_REQUEST_INCOMPLETE。
+  - 取消只影响该请求：`stopStream` 复位发送方向、`stopSending` 叫停接收方向，连接不受影响。Rust 的 `Drop` 改为显式 `close()`：未完成的发送方向
+    以 H3_REQUEST_CANCELLED 复位；接收方向在响应已完成时以 H3_NO_ERROR、否则以 H3_REQUEST_CANCELLED 叫停（RFC 9114 §4.1）。
+  - `split` 得到发送部分与接收部分，可在不同协程使用（接收部分保留已收到的字节）。
+- 431 的具体机制（参考 `ResolvedRequest::resolve`）：请求头部超过任一上限时，服务端在该请求流上发送状态 431 的响应 HEADERS，干净地结束发送
+  方向（FIN），再以 STOP_SENDING(H3_NO_ERROR) 停止读取请求（RFC 9114 §4.1：不依赖其余请求内容时可先发完整响应），`resolveRequest` 抛
+  `HeaderTooBig(实际, 上限)`，该请求计为结束，连接继续。参考发送同样的 431 HEADERS，其余交给流被丢弃：quinn 丢弃 `SendStream` 即 FIN，丢弃
+  `RecvStream` 即以码 0 STOP_SENDING。⚖️ 本库两步都显式进行，STOP_SENDING 用 RFC 建议的 H3_NO_ERROR 而非 0；不发 GREASE 帧。帧长超限时
+  （`maxHeadersFrameSize`）负载从未读取。客户端收到超限的响应头部 → `HeaderTooBig` 并 STOP_SENDING(H3_REQUEST_CANCELLED)（同参考）。
+- GOAWAY：
+  - ⚖️ 服务端 `shutdown(maxRequests)` 发送的 ID 是"第一个不会处理的流 ID"：最后接受的请求流之后再放行 `maxRequests` 个，即最后接受的 ID +
+    (`maxRequests` + 1) 个流；尚未接受任何请求时为第一个请求流 + `maxRequests`。ID **大于或等于** GOAWAY ID 的请求流以 H3_REQUEST_REJECTED
+    STOP_SENDING 并复位（RFC 9114 §5.2，§5 的 ⚖️ 决定）；参考发送最后一个会处理的 ID 并只拒绝更大的 ID（`>`），`shutdown(0)` 在未接受请求时
+    发 GOAWAY(0) 却仍接受流 0。拒绝由 `run()` 完成，不依赖是否调用 `accept()`；已排队未接受的流在 `shutdown` 时一并拒绝。
+  - GOAWAY 的 ID 只减不增：新的 ID 不小于已发送的就不再发送（同参考）。收到的 GOAWAY 比上一个大 → H3_ID_ERROR；客户端收到的 GOAWAY 不是
+    请求流 ID → H3_ID_ERROR（同参考）。收到或发送 GOAWAY 后连接进入 closing，客户端新请求报 `RemoteClosing`。
+  - 优雅结束：`accept()` 在没有进行中的请求时返回 null——收到对端 GOAWAY 后（同参考），或 ⚖️ 本端 GOAWAY 之前的所有流 ID 都已接受后（参考只
+    在拒绝某条流时才返回 None，否则一直等待）；返回前发送最后一个 GOAWAY（同参考）。请求在响应 `finish`、`stopStream` 或 `close` 后计为结束
+    （参考为 `RequestEnd` 的 `Drop`）。客户端 `shutdown` 发送 GOAWAY(0)（不接受推送）。
+- 错误映射（`src/error/`）：`ConnectionError`（Local(LocalError.Application(code, reason)) / Remote(ConnectionErrorIncoming) / Timeout，
+  `isH3NoError`）；`StreamError`（Stream(code, reason) / RemoteTerminate(code) / Connection(ConnectionError) / HeaderTooBig / RemoteClosing /
+  Undefined，`isH3NoError`）。本端发现的连接错误为 Local 并以其码关闭连接；QUIC 层报来的为 Remote（Timeout 单列），QUIC 层的
+  InternalError 以 H3_INTERNAL_ERROR 关闭；流操作失败时 ConnectionLost → `StreamError.Connection`（取已记录的连接错误）、StreamTerminated
+  → `RemoteTerminate`、其他 → `Undefined`；帧层错误按阶段 A 的码成为连接错误（`got_frame_error`）。
+- 公共 API（Kotlin 协程形态，形如 `neton.http.h2.server` / `client`，消息用 `neton.http` 的 `Request<Unit>` / `Response<Unit>` / `HeaderMap`，
+  版本 HTTP/3）：
+  - 服务端 `neton.http.h3.server`：`builder()`（`maxFieldSectionSize`、`maxHeadersFrameSize`、`maxFieldCount`、`sendGrease`）、`build(quic)` /
+    `newConnection(quic)`；`Connection.run()`（返回连接错误）、`accept(): RequestResolver?`、`shutdown(maxRequests)`、`close()`（H3_NO_ERROR，
+    参考的 `Drop`）、`peerSettings`；`RequestResolver.resolveRequest(): Pair<Request<Unit>, RequestStream>`；`RequestStream` 的
+    `sendResponse`、`sendData`、`sendTrailers`、`finish`、`stopStream`、`stopSending`、`recvData`、`recvTrailers`、`split`、`close`。
+  - 客户端 `neton.http.h3.client`：`builder()`、`build(quic)` / `newClient(quic)` 返回 `Pair<Connection, SendRequest>`；`Connection.run()`
+    （参考的 `poll_close` / `wait_idle`，服务端发起的双向流 → H3_STREAM_CREATION_ERROR）、`shutdown`、`isClosing`；`SendRequest.sendRequest`、
+    `clone`、`close`（最后一个关闭时以 H3_NO_ERROR 关闭连接，参考的 `Drop`）；`RequestStream` 的 `recvResponse`、`recvData`、`recvTrailers`、
+    `sendData`、`sendTrailers`、`finish`、`stopStream`、`stopSending`、`split`、`close`。
+- 测试：`:http3` macOS 262 个全部通过（阶段 A 的 160 个 + 本阶段 102 个；`./gradlew :http3:macosArm64Test`，强制重跑共 4 次均通过），
+  linuxX64、mingwX64 测试编译通过；`:http` 1,197 个（14 个忽略）、0 失败（本阶段未改 `:http`）。参考测试逐文件：
+  | 参考文件 | 参考测试数 | 移植 | 不适用 | 本库另加 |
+  |---|---|---|---|---|
+  | `src/tests/connection.rs` | 19 | 19（`ConnectionTest`） | 0 | — |
+  | `src/tests/request.rs` | 38 | 38（`RequestTest`） | 0 | — |
+  | 本库另加（`ConnectionLayerTest`） | — | — | — | 39 |
+  | 内存替身（`MemoryQuicTest`） | — | — | — | 6 |
+  - 两个参考文件中没有涉及推送、0-RTT、WebTransport、HTTP Datagram、动态 QPACK 的测试，全部适用、全部移植。
+  - 移植差异（均在测试中注明）：quinn 端点换成内存替身；Rust 的 `Drop` 换成显式 `close()`（服务端连接、`SendRequest`、请求流）或 `finish()`
+    （`request_sequence_check` 中服务端请求流被丢弃即 FIN）；`tokio::join!` / `select!` 换成协程与取消；空闲超时 10–200 ms 换成替身的
+    300 ms，沉默的一方等待连接结束而不是睡固定时长；固定的 `sleep`（如 `graceful_shutdown_grace_interval` 的 15 ms、`request_sequence_check`
+    的 100 ms、`settings_exchange_*` 的轮询）换成等待条件成立（上限宽松，本机常有高负载）；`graceful_shutdown_closes_when_idle` 的 100 ms
+    上限换成测试整体上限并断言服务端恰好处理 6 个请求；`header_too_big_client_error_trailer` 不再断言驱动以 quinn 的空闲超时结束（替身默认
+    无超时），改为客户端关闭；`connect`、`server_drop_close`、`header_too_big_client_error_trailer` 因替身即时关闭而先等对端就绪再关闭。
+  - 与 §5 的 ⚖️ 决定冲突而改断言的参考测试：无。GOAWAY 边界（`>=`）改变的是 GOAWAY 携带的 ID，参考的三个 `graceful_shutdown_*` 测试只
+    观察接受与拒绝的请求，在两种语义下相同；边界本身由另加测试断言（见下）。
+  - 另加 39 个：关键流 5（编码器流 FIN、解码器流复位、控制流复位、本端控制流被 STOP_SENDING、客户端侧控制流关闭）；QPACK 流 6（编码器流插入、
+    容量超过最大值、Insert Count Increment 为 0、客户端收到 Section Acknowledgment、合法指令不影响连接、第二条编码器流）；其他单向流 3（未知
+    类型被 STOP_SENDING、客户端推送流、客户端收到推送流）；控制流规则 6（第二个 SETTINGS、HEADERS、超长 HEADERS、服务端收到 PUSH_PROMISE、
+    客户端收到 MAX_PUSH_ID、服务端忽略 MAX_PUSH_ID / CANCEL_PUSH）；431 共 3（字段个数、帧长，以及客户端侧的超长响应头部）；取消隔离 2（客户端、
+    服务端取消其一，另一请求与连接不受影响）；阻塞 2（对端不读的响应体、服务端不读的请求体各阻塞一条请求流，另一请求照常完成，控制流上的
+    GOAWAY 照常送达）；GOAWAY 6（ID 为第一个不处理的流且边界上的流被拒、未接受请求时 GOAWAY(0) 拒绝流 0、宽限与 ID 只减不增、客户端与服务端
+    收到增大的 GOAWAY → H3_ID_ERROR、GOAWAY 后新请求报 RemoteClosing）；消息与流 6（格式错误只是流错误、content-length 不足 / 超出、trailer
+    中的伪头部、空 DATA 帧、拆分的流在不同协程中回显）。
+- ⚖️ 本阶段的有意不同（均有测试）：GOAWAY 边界 `>=` 与 GOAWAY ID 的计算（§5）；`run()` 驱动、QPACK 流照常读取并校验；本端关键流被
+  STOP_SENDING 即 H3_CLOSED_CRITICAL_STREAM；推送流按 RFC 拒绝；控制流上超长 HEADERS 的错误码；第一个连接错误即时关闭连接；431 后显式 FIN 与
+  STOP_SENDING(H3_NO_ERROR)；content-length 核对、trailer 伪头部、请求中的 `:status` / `:protocol`、空 DATA 帧；构造请求头失败不关闭连接；
+  `accept()` 在本端 GOAWAY 之前的流都已接受后返回 null。
+- 未决 / 后续：
+  - 阶段 C：以 neton.quic 实现薄接口（映射见上），第 3 层端到端测试（当前 QUIC 握手为 TLS 测试替身）；阶段 D：真实 TLS 到位后与 curl
+    `--http3`、quiche / nghttp3 / quinn-h3 双向互通与 h3spec（§6 中 h3spec 五项不继承跳过）。均未做。
+  - 性能未测；不支持 1xx（同参考）；客户端不在本地让 ID 不小于收到的 GOAWAY ID 的进行中请求失败，而是等服务端拒绝（同参考）；替身不模拟
+    流数上限（MAX_STREAMS）与乱序 / 丢包；编码前字段名小写化与 cookie 拆分仍照参考未做。
