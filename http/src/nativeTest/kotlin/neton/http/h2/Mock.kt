@@ -453,6 +453,19 @@ suspend fun concat(body: RecvStream): ByteArray {
     return out.toByteArray()
 }
 
+/**
+ * `util::wait_for_capacity`: waits until [stream] has at least [target] capacity. Only after a non-0 capacity was
+ * requested: until then, 0 is never reported.
+ */
+suspend fun waitForCapacity(stream: SendStream, target: Int): SendStream {
+    while (true) {
+        kotlin.test.assertNotNull(stream.awaitCapacity(), "poll_capacity returned None")
+        val act = stream.capacity()
+        kotlin.test.assertNotEquals(0, act)
+        if (act >= target) return stream
+    }
+}
+
 /** `util::yield_once`. */
 suspend fun yieldOnce() = kotlinx.coroutines.yield()
 

@@ -29,16 +29,6 @@ import kotlin.test.assertNotNull
 class PrioritizationTest {
     private val defaultWindowSize = DEFAULT_INITIAL_WINDOW_SIZE
 
-    private suspend fun waitForCapacity(stream: SendStream, target: Int) {
-        while (true) {
-            assertNotNull(stream.awaitCapacity())
-            val act = stream.capacity()
-            // A non-0 capacity was requested before: 0 is never returned.
-            assertNotEquals(0, act)
-            if (act >= target) return
-        }
-    }
-
     private fun post() = Request.builder().method(Method.POST).uri("https://http2.akamai.com/").body(Unit)
 
     @Test

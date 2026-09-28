@@ -48,19 +48,6 @@ class StreamStatesTest {
         return out
     }
 
-    /** `util::wait_for_capacity(stream, target)`. */
-    private suspend fun waitForCapacity(stream: SendStream, target: Int): SendStream {
-        while (true) {
-            stream.awaitCapacity()
-            val act = stream.capacity()
-            // If a non-0 capacity was requested for the stream before calling
-            // wait_for_capacity, then poll_capacity should return Pending
-            // until there is a non-0 capacity.
-            assertNotEquals(0, act)
-            if (act >= target) return stream
-        }
-    }
-
     @Test
     fun sendRecvHeadersOnly() = h2Test {
         val mock = MockIoBuilder()
