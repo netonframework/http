@@ -743,3 +743,21 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   未知长度响应、1 MiB 响应、HEAD、连接复用、Date 头、一个连接上 10 路并行多路复用、响应版本为 2。请求目标照 hyper 为由 `:scheme` 与
   `:authority` 构成的绝对 URI。HTTP/1.x 的 14 项同时复跑通过。
 
+- hyper `tests/server.rs` / `client.rs` 中 HTTP/2 专有用例移植（服务端 19、客户端 12；keep-alive 用例按 1/4 时间比例，重复运行无抖动）：
+  - 修正两处实现：h2 客户端连接在写出过程中释放最后一个流后不再空等下一帧（照 h2：驱动在停泊前再查一次，客户端无句柄时发 GOAWAY）；
+    `SendRequest` 在 h2 连接结束时立即报告已关闭（照 hyper：分发器随连接结束）。`rst_while_closing` 的适配随之改为期望该 GOAWAY。
+  - 两处断言与 hyper 测试不同：hyper 的这两个断言位于其看不到 panic 的后台任务中，且与 hyper 自身实现矛盾（已核对参考源码）——
+    `H2Upgraded::poll_read` 把 NO_ERROR / CANCEL 复位视为正常结束；h2 0.4.19 `Recv::recv_data` 只丢弃不带 END_STREAM 的空 DATA 帧，
+    带 END_STREAM 的空帧作为空块交付。本库按参考实现断言。
+  - `http2` / `http2_only` 是测试夹具的选项而非用例；`http1_response_with_http2_version`、`http1_conn_coerces_http2_request` 属 HTTP/1，
+    早已移植。
+  - 153 上 epoll 与 io_uring 全量 1,195 个测试全过（14 个与参考一致地忽略）。
+- h2spec 的验收对象（补记）：服务须像 h2 的 CI 示例服务那样先读完请求再响应（`echoServer`），此时 145 / 145 每轮都过。对不读请求就立即
+  响应的 hello 服务，h2spec 在 4 个用例（第二个不带 END_STREAM 的 HEADERS、trailer 中的伪头部、content-length 与 DATA 不符、
+  RST_STREAM 之后的 HEADERS）中会先收到响应的 DATA 帧而判失败，随时序出现（io_uring 上每轮 1–3 个）；hyper 的 hello 服务同样
+  失败（每轮 1–2 个，同类用例）。这是测试方式的产物，不是协议偏差。
+- HTTP/2 性能对照（153，单核，cachegrind，oha h2c 10 连接 × 每连接 10 路并发，hello；hyper 为 `http2::Builder` 默认值）：
+  - 起点 neton 43,160 对 hyper 27,070 Ir/请求（1.6 倍）。
+  - 头部值相等比较改为每次 8 字节：HPACK 编码器每个响应都把 date 值与动态表中同名项比较，逐字节循环每次约 645 Ir → 38,220。
+  - 发送路径以名字而非字符串检查 keep-alive / proxy-connection，HeaderMap 按名字匹配时先比同一性 → **约 37,200**（1.37 倍）。
+    剩余成本分散在 h2 流状态机各处，无单点。
