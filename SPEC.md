@@ -1132,3 +1132,6 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   真实 TLS 到位后再加。性能未测。
 - 未决 / 后续：阶段 D（真实 TLS、与外部 HTTP/3 实现双向互通、h3spec，§6 中 h3spec 五项不继承跳过）；上面 quic 的第 1 条；替身与 neton.quic
   都未覆盖丢包与乱序下的 HTTP/3 行为（回环不丢包）；其余同阶段 B 的未决项。
+- 阶段 C 报告的 quic 写入不让出问题已在 quic 修复（quic SPEC §11.8 补记，提交 d9b8186：连续 32 次未挂起的写入后让出一次）。
+  `oversizedResponseHeadersFrameFailsOnClient` 在真实 QUIC 上由 macOS 3–7 s（153 上 9–17 s）降到约 1 s；http3 369 个测试全过。
+
