@@ -86,28 +86,34 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
     private val frameCall = InlineCall<Body, Frame?>(Body::nextFrame)
     private val noop: () -> Unit = {}
 
-    // The handoffs between the caller, the connection and its reader are reusable signals, not a CompletableDeferred
-    // or a launched coroutine per request: on Kotlin/Native their Job machinery cost more than the exchange itself.
-    // Everything runs on the connection's reactor thread; one caller at a time (hyper's `SendRequest` is `&mut`).
-    private class Pending(val request: Request<out Body>)
+    // hyper's client dispatcher, arranged for Kotlin/Native: [run] is the connection's only reader. While idle it waits
+    // in the read itself (hyper `require_empty_read`); a request's caller writes the head (the write lock orders
+    // writers), so a request needs no wake-up of the connection, and the bytes that end the idle read are its response.
+    // The response and the end of its body are handed over by reusable signals: a CompletableDeferred, a launched
+    // coroutine or a cancellable suspension per step cost more than the exchange itself. Everything runs on the
+    // connection's reactor thread; one caller at a time (hyper's `SendRequest` is `&mut`).
+    private class Pending(val request: Request<out Body>, val onInformational: OnInformational?)
 
     private var pending: Pending? = null
     private val response = Slot<Response<Incoming>>()
-    private val wake = Signal()
-    private var wanting = false
+    private var idle = false
     private var bufferedOnce = false
     private val readySignal = Signal()
     private var closedError: HttpError? = null
     private var closed = false
     private val bodyDone = Signal()
     private var awaitingBody = false
+    private var scope: kotlinx.coroutines.CoroutineScope? = null
+    private var writer: kotlinx.coroutines.Job? = null
+    private var deferredBody: Body? = null
+    private var sendFailure: Throwable? = null
 
     init {
         io.queueStrategy = config.writev ?: true
         conn.onBodyDone = { if (awaitingBody) bodyDone.raise() }
     }
 
-    internal val isReady: Boolean get() = !closed && wanting && pending == null
+    internal val isReady: Boolean get() = !closed && idle && pending == null
     internal val isClosed: Boolean get() = closed
 
     internal suspend fun ready() {
@@ -119,14 +125,40 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
     }
 
     internal suspend fun send(request: Request<out Body>): Response<Incoming> {
-        if (closed || pending != null || !(wanting || !bufferedOnce)) {
+        if (closed || pending != null || !(idle || !bufferedOnce)) {
             throw HttpError(HttpError.Kind.Canceled, IllegalStateException("connection was not ready"))
         }
         bufferedOnce = true
+        idle = false
         response.reset()
-        pending = Pending(request)
-        wanting = false
-        wake.raise()
+        val body: Body = request.body
+        val bodyLen: Long? = if (body.isEndStream) null else body.exactLength.let { if (it < 0) OutgoingBody.UNKNOWN else it }
+        pending = Pending(request, request.extensions.get<OnInformational>())
+        io.writeLock.withLock { conn.writeHead(request.parts, bodyLen) }
+        conn.error?.let { e ->
+            // Nothing was written: the connection stays usable (its read is still waiting).
+            conn.error = null
+            pending = null
+            if (!closed) idle = true
+            readySignal.raise()
+            throw e
+        }
+        if (conn.canWriteBody) {
+            // The body from a child of the connection, in parallel with reading the response (hyper lets a server
+            // answer early); a body sent before the connection runs starts with it.
+            val sc = scope
+            if (sc != null) writer = sc.launch(start = CoroutineStart.UNDISPATCHED) { writeBody(body) } else deferredBody = body
+        } else {
+            try {
+                io.writeLock.withLock { conn.flush() }
+            } catch (e: HttpError) {
+                // The connection fails with the write error; its parked read is woken by closing the stream.
+                pending = null
+                sendFailure = e
+                stream.close()
+                throw e
+            }
+        }
         return response.await()
     }
 
@@ -137,17 +169,20 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
      */
     suspend fun run() = coroutineScope {
         frameCall.context = coroutineContext
+        scope = this
         var upgraded = false
         var failure: Throwable? = null
-        val reader = launch(start = CoroutineStart.UNDISPATCHED) { readerLoop() }
         try {
+            deferredBody?.let { b -> deferredBody = null; writer = launch(start = CoroutineStart.UNDISPATCHED) { writeBody(b) } }
             upgraded = loop()
         } catch (e: Throwable) {
-            failure = e
-            throw if (e is IoException) HttpError(HttpError.Kind.Io, e) else e
+            failure = sendFailure ?: e
+            val f = failure
+            throw if (f is IoException) HttpError(HttpError.Kind.Io, f) else f
         } finally {
-            reader.cancel()
+            scope = null
             closed = true
+            idle = false
             // hyper `SenderDropGuard`: a response body still being read ends with IncompleteMessage, not a clean end.
             if (conn.canReadBody) conn.closeRead()
             closedError = (failure as? HttpError) ?: HttpError(HttpError.Kind.ChannelClosed)
@@ -160,57 +195,33 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
 
     private suspend fun kotlinx.coroutines.CoroutineScope.loop(): Boolean {
         while (true) {
-            // Idle: wait for a request while watching the read side (hyper `require_empty_read`).
-            val p = awaitRequest() ?: return false
-            if (!exchange(p)) return true
+            sendFailure?.let { throw it }
+            if (pending == null) {
+                // Idle: take a request while watching the read side (hyper `require_empty_read`).
+                if (io.readBuf.readableBytes > 0) throw HttpError(HttpError.Kind.UnexpectedMessage)
+                idle = true
+                readySignal.raise()
+                if (!io.readEof) {
+                    try {
+                        io.readFromIo()
+                    } catch (e: IoException) {
+                        sendFailure?.let { throw it }
+                        throw HttpError(HttpError.Kind.Io, e)
+                    }
+                }
+                sendFailure?.let { throw it }
+                if (pending == null) {
+                    idle = false
+                    if (io.readBuf.readableBytes > 0) throw HttpError(HttpError.Kind.UnexpectedMessage)
+                    return false                                       // the server closed an idle connection
+                }
+                // A request was sent while waiting: what was read is the start of its response.
+            }
+            idle = false
+            if (!exchange(pending!!)) return true
             conn.tryKeepAlive()
             if (!conn.isIdle) {
                 if (conn.isReadClosed || conn.isWriteClosed) return false
-            }
-        }
-    }
-
-    // The idle read (hyper `require_empty_read`): while waiting for a request the connection watches the read side,
-    // and that read is also the first read of the next response's head. One reader coroutine for the connection's
-    // life does it on request ([readRequested]), instead of a coroutine launched per idle period.
-    private val readRequested = Signal()
-    private val readDone = Signal()
-    private var idleReading = false
-    private var idleReadFinished = false
-    private var idleReadResult = 0
-    private var idleReadError: Throwable? = null
-
-    private suspend fun readerLoop() {
-        while (true) {
-            readRequested.await()
-            try { idleReadResult = io.readFromIo() } catch (e: IoException) { idleReadError = e }
-            idleReading = false
-            idleReadFinished = true
-            readDone.raise()
-            wake.raise()
-        }
-    }
-
-    private suspend fun awaitRequest(): Pending? {
-        while (true) {
-            pending?.let { return it }
-            if (io.readBuf.readableBytes > 0) throw HttpError(HttpError.Kind.UnexpectedMessage)
-            if (!idleReading && !idleReadFinished && !io.readEof) {
-                idleReadError = null
-                idleReading = true
-                readDone.clear()
-                readRequested.raise()
-            }
-            wake.clear()
-            wanting = true
-            readySignal.raise()
-            if (pending == null && !idleReadFinished) wake.await()
-            pending?.let { return it }
-            if (idleReadFinished) {
-                idleReadFinished = false
-                idleReadError?.let { throw HttpError(HttpError.Kind.Io, it) }
-                if (idleReadResult == 0) return null                       // the server closed an idle connection
-                throw HttpError(HttpError.Kind.UnexpectedMessage)
             }
         }
     }
@@ -228,29 +239,13 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         }
     }
 
-    /** One request / response exchange; false when the connection was upgraded. */
-    private suspend fun kotlinx.coroutines.CoroutineScope.exchange(p: Pending): Boolean {
-        wanting = false
-        val request = p.request
-        val body: Body = request.body
-        val bodyLen: Long? = if (body.isEndStream) null else body.exactLength.let { if (it < 0) OutgoingBody.UNKNOWN else it }
-        val onInformational = request.extensions.get<OnInformational>()
-        io.writeLock.withLock { conn.writeHead(request.parts, bodyLen) }
-        conn.error?.let { e -> conn.error = null; response.fail(e); pending = null; return true }
-        val writer = if (conn.canWriteBody) launch(start = CoroutineStart.UNDISPATCHED) { writeBody(body) } else {
-            io.writeLock.withLock { conn.flush() }
-            null
-        }
-        // The response: the parked idle read (if any) is the first read of its head.
-        if (idleReading || idleReadFinished) {
-            while (!idleReadFinished) readDone.await()
-            idleReadFinished = false
-            idleReadError?.let { throw HttpError(HttpError.Kind.Io, it) }
-        }
+    /** Reads the response to the request in flight (its head was written by [send]); false when upgraded. */
+    private suspend fun exchange(p: Pending): Boolean {
+        val w = writer
         val head = try {
             conn.readHead(0, 0, false) as H1Conn.ResponseHead?
         } catch (e: HttpError) {
-            writer?.cancel()
+            w?.cancel()
             pending = null
             response.fail(e)
             throw e
@@ -261,6 +256,7 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
             response.fail(e)
             throw e
         }
+        val onInformational = p.onInformational
         if (onInformational != null) for (info in head.informational) onInformational.callback(info)
         val upgrade = if (head.wantsUpgrade) OnUpgrade().also { head.parts.extensions.insert(it) } else null
         val incoming = if (head.bodyLength == 0L) Incoming.EMPTY else Incoming(conn, conn.bodyGeneration, head.bodyLength)
@@ -271,7 +267,7 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         if (waitBody) {
             try { bodyDone.await() } finally { awaitingBody = false }
         }
-        writer?.join()
+        if (w != null) { w.join(); writer = null }
         if (upgrade != null) {
             if (!config.upgrades) {
                 upgrade.fail(HttpError(HttpError.Kind.UserManualUpgrade))
