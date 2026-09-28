@@ -167,7 +167,9 @@ class Http1Connection internal constructor(private val stream: IoStream, private
         while (!closing) {
             watch?.let { w ->
                 watch = null
-                if (!w.isCompleted && !awaitIdleRead(w)) return
+                // hyper `is_done`: a connection that will not read another head ends now instead of waiting for the peer.
+                if (!w.isCompleted && !conn.canReadHead) { w.cancel(); return }
+                if (!w.isCompleted) awaitIdleRead(w)
                 watchError?.let { throw it }
             }
             if (!conn.canReadHead) return
@@ -194,13 +196,19 @@ class Http1Connection internal constructor(private val stream: IoStream, private
         }
     }
 
-    /** The idle wait for the next request when a read-side watch is already parked: bounded by the idle timeout. */
-    private suspend fun awaitIdleRead(w: Job): Boolean {
+    /**
+     * The idle wait for the next request when a read-side watch is already parked: bounded by the idle timeout, whose
+     * expiry is [HttpError.Kind.HeaderTimeout] (hyper: the header read timer also covers the idle wait).
+     */
+    private suspend fun awaitIdleRead(w: Job) {
         val t = config.keepAliveIdleTimeoutMillis
-        if (t <= 0) { w.join(); return true }
+        if (t <= 0) { w.join(); return }
         val done = withTimeoutOrNull(t) { w.join(); true }
-        if (done == null) { w.cancel(); conn.close(); return false }
-        return true
+        if (done == null) {
+            w.cancel()
+            conn.close()
+            throw HttpError(HttpError.Kind.HeaderTimeout)
+        }
     }
 
     /** ⚖️ A declared request body over [Http1ServerConfig.maxRequestBodySize]: 413 and close, without calling the service. */
@@ -263,6 +271,8 @@ class Http1Connection internal constructor(private val stream: IoStream, private
                 throw watchError ?: e
             }
         } else {
+            // hyper `poll_write`: an empty body still ends a body the head started (a user `transfer-encoding: chunked`).
+            if (conn.canWriteBody) io.writeLock.withLock { conn.endBody() }
             flushLocked()
         }
     }

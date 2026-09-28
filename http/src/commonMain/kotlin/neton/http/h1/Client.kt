@@ -144,6 +144,8 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
             throw if (e is IoException) HttpError(HttpError.Kind.Io, e) else e
         } finally {
             closed = true
+            // hyper `SenderDropGuard`: a response body still being read ends with IncompleteMessage, not a clean end.
+            if (conn.canReadBody) conn.closeRead()
             closedError = (failure as? HttpError) ?: HttpError(HttpError.Kind.ChannelClosed)
             pending?.response?.completeExceptionally(
                 if (failure is HttpError) failure else HttpError(HttpError.Kind.Canceled, failure),
@@ -198,6 +200,19 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         }
     }
 
+    /**
+     * The request body (from the writer coroutine). A failure (the body's or the write's) is the pending request's
+     * error, as hyper's dispatcher hands a write error to the request's callback before the connection ends.
+     */
+    private suspend fun writeBody(body: Body) {
+        try {
+            conn.pumpBody(body, frameCall, noop)
+        } catch (e: HttpError) {
+            pending?.let { pending = null; it.response.completeExceptionally(e) }
+            throw e
+        }
+    }
+
     /** One request / response exchange; false when the connection was upgraded. */
     private suspend fun kotlinx.coroutines.CoroutineScope.exchange(p: Pending): Boolean {
         wanting = false
@@ -207,7 +222,7 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
         val onInformational = request.extensions.get<OnInformational>()
         io.writeLock.withLock { conn.writeHead(request.parts, bodyLen) }
         conn.error?.let { e -> conn.error = null; p.response.completeExceptionally(e); pending = null; return true }
-        val writer = if (conn.canWriteBody) launch(start = CoroutineStart.UNDISPATCHED) { conn.pumpBody(body, frameCall, noop) } else {
+        val writer = if (conn.canWriteBody) launch(start = CoroutineStart.UNDISPATCHED) { writeBody(body) } else {
             io.writeLock.withLock { conn.flush() }
             null
         }

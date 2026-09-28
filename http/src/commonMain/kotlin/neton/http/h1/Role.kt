@@ -225,9 +225,10 @@ class ServerHeadParser(val config: H1Config = H1Config()) {
             return fail(if (e == HttpParseError.Token) { if (req.methodStart < 0) H1ParseError.Method else H1ParseError.Uri } else H1ParseError.fromHttpParse(e))
         }
         val consumed = st
-        if (consumed > config.maxHeaderSectionSize) return fail(H1ParseError.TooLarge)
+        // The URI and request-line limits come first (hyper checks the URI right after parsing; the partial path does too).
         if (req.pathEnd - req.pathStart > MAX_URI_LEN) return fail(H1ParseError.UriTooLong)
         if (requestLineLength(buf) > config.maxRequestLineSize) return fail(H1ParseError.UriTooLong)
+        if (consumed > config.maxHeaderSectionSize) return fail(H1ParseError.TooLarge)
         val method = Method.tryFromBytes(buf, req.methodStart, req.methodEnd - req.methodStart) ?: return fail(H1ParseError.Method)
         val isHttp11 = req.version == 1
         var keepAlive = isHttp11
@@ -751,15 +752,11 @@ object ClientHeadEncoder {
         return EncodePlan(EncodePlan.LENGTH, len, null, false)
     }
 
-    /** Appends `, chunked` to the last Transfer-Encoding value (hyper `headers::add_chunked`). */
+    /** Appends `, chunked` to the last Transfer-Encoding value in place, keeping the header order (hyper `headers::add_chunked`). */
     private fun addChunked(headers: HeaderMap<HeaderValue>) {
-        val all = ArrayList<HeaderValue>()
-        for (v in headers.getAll(HeaderName.TRANSFER_ENCODING)) all.add(v)
-        headers.remove(HeaderName.TRANSFER_ENCODING)
-        for (i in all.indices) {
-            val v = if (i < all.lastIndex) all[i] else HeaderValue.fromBytes(all[i].asBytes() + ", chunked".encodeToByteArray())
-            headers.append(HeaderName.TRANSFER_ENCODING, v)
-        }
+        val values = (headers.entry(HeaderName.TRANSFER_ENCODING) as neton.http.header.Entry.Occupied).iterMut()
+        val last = values.nextBack()
+        values.set(HeaderValue.fromBytes(last.asBytes() + ", chunked".encodeToByteArray()))
     }
 }
 

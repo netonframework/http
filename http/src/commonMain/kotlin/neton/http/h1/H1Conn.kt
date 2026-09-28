@@ -50,6 +50,9 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
     private val clientParser = if (isServer) null else ClientHeadParser(config)
     private var partialLen = -1
 
+    /** Up to this many buffered bytes an incomplete head cannot break a ⚖️ limit the parser checks on partial heads. */
+    private val partialSkipLimit = if (isServer) minOf(config.maxRequestLineSize, config.maxHeaderSectionSize) else config.maxHeaderSectionSize
+
     enum class Reading { INIT, CONTINUE, BODY, KEEP_ALIVE, CLOSED }
     enum class Writing { INIT, BODY, KEEP_ALIVE, CLOSED }
     enum class KA { IDLE, BUSY, DISABLED }
@@ -82,9 +85,9 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
      * there is none: the peer closed an idle connection, or a parse error was answered with an automatic response
      * already buffered and [error] set (hyper `on_parse_error`). Throws [HttpError] for the other errors.
      *
-     * Timeouts (⚖️ SPEC §3.7): [idleTimeoutMillis] while no byte of the head has arrived (0: none) — expiring is a
-     * quiet close; [headerTimeoutMillis] from the first byte (or from the start, for the first request) to the end
-     * of the head — expiring is [HttpError.Kind.HeaderTimeout].
+     * Timeouts (⚖️ SPEC §3.7): [idleTimeoutMillis] while no byte of the head has arrived (0: none);
+     * [headerTimeoutMillis] from the first byte (or from the start, for the first request) to the end of the head.
+     * Either expiring is [HttpError.Kind.HeaderTimeout] (hyper's one header timer covers the idle wait too).
      */
     suspend fun readHead(idleTimeoutMillis: Long, headerTimeoutMillis: Long, firstRequest: Boolean): Any? {
         check(canReadHead)
@@ -111,7 +114,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
             val n = try {
                 io.readFromIo()
             } catch (e: TimeoutException) {
-                if (deadline == 0L) { closeRead(); closeWrite(); return null }        // idle: a quiet close
+                if (deadline == 0L) closeWrite()                                     // idle: nothing to answer
                 closeRead()
                 throw HttpError(HttpError.Kind.HeaderTimeout)
             } catch (e: IoException) {
@@ -129,7 +132,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
         if (len == 0) return null
         val arr = buf.backingArray()
         val off = buf.readerIndex()
-        if (partialLen >= 0 && !isCompleteFast(arr, off, len, partialLen)) return null
+        if (partialLen >= 0 && len <= partialSkipLimit && !isCompleteFast(arr, off, len, partialLen)) return null
         return if (isServer) parseRequest(arr, off, len) else parseResponse(arr, off, len)
     }
 
@@ -138,6 +141,9 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
         val n = p.parse(arr, off, len)
         if (n == ParseStatus.PARTIAL) return null
         if (n < 0) { onReadHeadErrorSync(parseError(p.error!!)); return null }
+        // hyper caps its reads at max_buf_size while a head is incomplete, so a longer head is TooLarge however the
+        // stream split it (neton-io reads may bring more at once).
+        if (n > io.maxBufSize) { onReadHeadErrorSync(HttpError(HttpError.Kind.ParseTooLarge)); return null }
         io.readBuf.skip(n)
         partialLen = -1
         val parts = p.parts!!
@@ -156,6 +162,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
             return null
         }
         if (n < 0) { onReadHeadErrorSync(parseError(p.error!!)); return null }
+        if (n > io.maxBufSize) { onReadHeadErrorSync(HttpError(HttpError.Kind.ParseTooLarge)); return null }
         io.readBuf.skip(n)
         partialLen = -1
         h09Responses = false
@@ -283,15 +290,16 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
                         bodyError = HttpError(HttpError.Kind.UserBodyTooLarge)
                         throw bodyError!!
                     }
-                    if (d.isEof) { reading = Reading.KEEP_ALIVE; tryKeepAlive(); onBodyDone() }
+                    if (d.isEof) endOfBody()
                     return Frame.Data(data)
                 }
                 DecodeResult.TRAILERS -> {
-                    reading = Reading.KEEP_ALIVE; tryKeepAlive(); onBodyDone()
-                    return Frame.Trailers(d.trailers!!)
+                    val trailers = d.trailers!!
+                    endOfBody()
+                    return Frame.Trailers(trailers)
                 }
                 DecodeResult.END -> {
-                    reading = Reading.KEEP_ALIVE; tryKeepAlive(); onBodyDone()
+                    endOfBody()
                     return null
                 }
                 DecodeResult.ERROR -> {
@@ -303,6 +311,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
                     val n = try {
                         io.readFromIo()
                     } catch (e: IoException) {
+                        if (reading == Reading.CLOSED) throw bodyClosedError()    // the connection ended under the read
                         close()
                         bodyError = HttpError(HttpError.Kind.Body, e)
                         throw bodyError!!
@@ -311,6 +320,17 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
                 }
             }
         }
+    }
+
+    /**
+     * The body being read has ended: its reader is detached (later reads return null, like hyper's finished body
+     * channel, even when [tryKeepAlive] closes the connection now) and keep-alive is decided.
+     */
+    private fun endOfBody() {
+        reading = Reading.KEEP_ALIVE
+        bodyGeneration++
+        tryKeepAlive()
+        onBodyDone()
     }
 
     override fun remaining(generation: Int): Long = if (generation == bodyGeneration) bodyRemaining else 0
