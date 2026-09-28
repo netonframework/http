@@ -583,7 +583,22 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   | 头部以字节常量、头部名字节、缓存的 Date 字节与十进制写出，不经 String；解析出的头部表一次定容；访问器去掉属性引用 | 22,531 | 42 |
   | 每连接复用编码器 / 解码器 / 编码计划；排队的切片复用包装缓冲（neton-io `Buffer.borrow`）；flush 路径少一层挂起；缺席头部的快速判断 | 21,463 | 35 |
   | 单线程写闸门代替 kotlinx `Mutex`；消息头部表与扩展延迟创建 | 19,879 | 32 |
-  仍为 hyper 的约 3 倍，继续：剩余成本主要是分配与 GC（清零、分配、清扫、标记约 5k）与每请求约 10 层挂起函数的续体。
+  | neton-io vectored send 按 fd 缓存 pin、每线程 iovec 暂存 | 18,814 | 31 |
+  | （合入 hyper 测试移植的修正后基线） | 18,751 | 31 |
+  | Date 缓存每秒只读一次墙钟（`Clock.System.now` 每次分配 `Instant`）；读与 flush 内联 | 18,256 | 28 |
+  | `InlineCall` 直接调用挂起函数引用（省去每次的包装与 lambda 实例） | 17,875 | 26 |
+  | 响应写出与 flush 少一层挂起；基准服务按 hyper `hello.rs` 用 `Response(body)` | 17,115 | 23 |
+  | 连接状态由枚举改为 Int 常量（每次读枚举项都检查类初始化） | 16,714 | 23 |
+  | 状态码按数值比较；H1Io 的数组；neton-io 时钟直接读 `clock_gettime` | 15,821 | 23 |
+  | neton-io：只设读超时的读仍是尾调用（每次定时读不再分配续体） | 15,434 | 23 |
+  - 反例（已撤回）：把 `exchange` 与 `pumpBody` 内联进连接循环，分配 23 → 20，但指令数 15,434 → 18,994——循环的帧变大，每次恢复清零的代价
+    超过省下的续体（与 neton-io 的 K/N 经验一致）。
+  - 按类别（每请求）：GC 约 4.2k、HTTP 解析 4.1k、反应器 I/O 2.0k、编码 1.9k、协程机制 1.3k、连接逻辑 0.7k。剩余的主要杠杆是分配次数与解析路径。
+  - 超时的代价：关闭头部 / 空闲超时为 15,197（开启时 15,821，改为尾调用后 15,434）。
+- 吞吐对照（153，wrk 2 线程 50 连接，每轮交替，3 轮；该主机上 hyper 自身在各轮间波动约 ±20%）：
+  - 服务端绑定 1 核：neton 76–97k req/s、p99 约 7 ms；hyper 112–158k、p99 0.4–0.5 ms。p99 来自 K/N 的 GC 线程与反应器共用这一核：GC 线程
+    占用的 CPU 很少，但它一旦运行，反应器要等一个调度时间片（给进程 2 核时同样 8 s CPU 下 p99 0.72 ms、吞吐 114k）。`setMinHeap` 不改变此现象。
+  - 服务端绑定 2 核（hyper 仍为单线程）：neton 103–128k、p99 0.61–0.77 ms；hyper 117–157k、p99 0.38–0.55 ms。
 
 **HTTP/2：帧与编解码器（2026-09-28）**
 - `neton.http.h2.frame`（DATA、HEADERS、PRIORITY、RST_STREAM、SETTINGS、PUSH_PROMISE、PING、GOAWAY、WINDOW_UPDATE、CONTINUATION，h2 的解析
