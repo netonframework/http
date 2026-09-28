@@ -527,11 +527,22 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 
 ## 11. 实施记录
 
-**第 1 步：通用类型（2026-09-28，进行中）**
+**第 1 步：通用类型（2026-09-28，完成，`Request` / `Response` / `Body` 随 HTTP/1.1 连接层一起做）；第 2 步：HTTP/1.1 头部解析器完成；HTTP/2 的 HPACK 完成**
 - 已完成并合入：`Method` / `StatusCode` / `Version` / `Extensions`（`neton.http`）；`HeaderName` / `HeaderValue`（`neton.http.header`）；`Uri` 及其部件
   （`neton.http.uri`）。参考中的测试（`#[test]`、`test_parse!` 用例与断言行为的文档示例）逐条移植，另加 SPEC 条目的测试；macOS 224/224，
   linuxX64 / mingwX64 编译通过。
 - 与参考的差异均为 Kotlin 形态所迫并在 KDoc 中说明：与字符串的比较用 `eq` / `equalsIgnoreCase` / `contentEquals`（Kotlin 的 `==` 不能跨类型重载）；
   Rust 的 `Builder` / `Parts` 在 uri 包中名为 `UriBuilder` / `UriParts`；Rust panic 之处抛异常。有意保留的参考行为：`Scheme` 大写与常量不等、端口可带
   前导 `+`、`fromStatic` 的宽松检查等。
-- 进行中：`HeaderMap`（含 Green / Yellow / Red 防碰撞与 SipHash-1-3，随机密钥取自 neton-io `secureRandom`）；HTTP/1.1 头部解析器（httparse）。
+- `HeaderMap`（`neton.http.header`）：Robin Hood 开放寻址（索引表为一个 `IntArray`，名字 / 值 / 额外值链表为并行数组），查找与容量内插入不分配；
+  Green / Yellow / Red 防碰撞状态机与参考逐条一致，Red 用 SipHash-1-3（密钥取自 neton-io `secureRandom`；以 Rust 的 64 个 SipHash-1-3 向量验证），以
+  真实碰撞驱动 Green → Yellow → Red 与 Yellow → Green 两条路径的测试；`tests/header_map.rs` 35 个、文档示例 56 个、模型模糊测试（含 Red 状态下）。
+  **发现参考的缺陷**：`insert_mult` 在同名值 ≥ 3 个时崩溃（先清空链表再解链，已用 Rust 实际运行确认）；本库先解链，返回全部值。
+  与参考的差异：`try*` 返回 `kotlin.Result`（null 已表示"无旧值"）；`&mut T` 改为 setter；过期的迭代器 / 条目在运行时报错（Rust 由借用检查保证）。
+- HTTP/1 头部解析器（`neton.http.h1.parse`，httparse 1.10.1）：零复制零分配（结果为调用方提供的槽位中的偏移），8 字节 SWAR 扫描；默认拒绝单独的 LF
+  （`allowBareLf` 恢复参考行为，以全部 263 个 URI 用例改为 LF 验证）；参考测试全部移植：`#[test]` 51、`req!` / `res!` 42、`tests/uri.rs` 263、
+  SIMD 测试改为 SWAR 与逐字节循环的等价测试；每个解析测试另在更大数组中间再跑一次，确认不越界读取。
+- HPACK（`neton.http.h2.hpack`，h2 0.4.19）：解码 / 编码 / Huffman / 表；参考测试全部移植（`test_evicted_overflow` 与参考一样忽略）；hpack-test-case
+  的 12 个实现目录 382 个故事、40,374 个用例（469,664 个头部）解码并重新编码往返，另加 `raw-data` 32 个故事的往返。测试资源 58 MB 在
+  `http/src/nativeTest/resources/hpack-test-case/`（附 NOTICE）。
+- 合计：macOS 498 个测试通过（1 个与参考一致地忽略），linuxX64 / mingwX64 编译通过。
