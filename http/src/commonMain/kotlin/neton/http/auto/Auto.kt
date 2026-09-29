@@ -203,10 +203,9 @@ class AutoConnection internal constructor(
     private suspend fun readVersion(): Pair<Int, Bytes> {
         if (cancelled) throw cancelledError()
         val timeout = http1.headerReadTimeoutMillis
-        if (timeout > 0) {
-            require(StreamCapability.ReadTimeout in stream.capabilities) {
-                "the header read timeout needs a stream with ReadTimeout; set it to 0 for this stream"
-            }
+        if (timeout > 0 && StreamCapability.ReadTimeout !in stream.capabilities) {
+            stream.close()
+            throw IllegalArgumentException("the header read timeout needs a stream with ReadTimeout; set it to 0 for this stream")
         }
         val deadline = if (timeout > 0) nowMillis() + timeout else 0L
         val buf = Buffer(PREFACE.size)

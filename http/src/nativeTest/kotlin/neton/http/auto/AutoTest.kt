@@ -518,6 +518,7 @@ class AutoTest {
         if (!testTransportIsTcp) {
             // Memory streams have no read timeout: refused, as HTTP/1 refuses it.
             assertFailsWith<IllegalArgumentException> { cfg.serveConnection(server, hello).serve() }
+            assertEquals(0, client.readToEnd().size)        // and the stream is closed
             return@hyperTest
         }
         val task = spawn { cfg.serveConnection(server, hello).serve() }
