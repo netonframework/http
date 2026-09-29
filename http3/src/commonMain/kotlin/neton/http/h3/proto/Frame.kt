@@ -319,6 +319,14 @@ sealed class FrameError(val code: Code) {
         override fun toString() = "frame 0x${type.toString(16)} is not allowed h3"
     }
 
+    /**
+     * ⚖️ A control-stream frame type (SETTINGS, CANCEL_PUSH, GOAWAY, MAX_PUSH_ID) on a request stream (RFC 9114 §7.2.3,
+     * §7.2.4, §7.2.6, §7.2.7), rejected from the frame header whatever its payload (see [neton.http.h3.FrameDecoder]).
+     */
+    data class Unexpected(val type: Long) : FrameError(Code.H3_FRAME_UNEXPECTED) {
+        override fun toString() = "frame 0x${type.toString(16)} is not allowed on a request stream"
+    }
+
     /** An invalid SETTINGS payload. */
     data class Settings(val error: SettingsError) : FrameError(Code.H3_SETTINGS_ERROR) {
         override fun toString() = "invalid settings: $error"

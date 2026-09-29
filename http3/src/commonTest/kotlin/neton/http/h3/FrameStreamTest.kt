@@ -284,4 +284,24 @@ class FrameStreamTest {
         assertEquals(10_000_000L, total)
         assertTrue(!s.hasData)
     }
+
+    /** ⚖️ On a request stream, control-stream frame types are H3_FRAME_UNEXPECTED from the header, whatever follows. */
+    @Test
+    fun requestStreamRejectsControlFramesFromTheHeader() {
+        for (type in listOf(FrameType.SETTINGS, FrameType.CANCEL_PUSH, FrameType.GOAWAY, FrameType.MAX_PUSH_ID)) {
+            // Only the frame header: the payload has not arrived, and would be malformed anyway.
+            val header = Buffer().also { VarInt.encode(type, it); VarInt.encode(0, it) }
+            val e = assertFailsWith<FrameException> { FrameDecoder(requestStream = true).decode(header) }
+            assertEquals(FrameError.Unexpected(type), e.error)
+            assertEquals(Code.H3_FRAME_UNEXPECTED, e.code)
+        }
+        // Elsewhere (a control stream) the empty CANCEL_PUSH stays a malformed frame.
+        val empty = Buffer().also { VarInt.encode(FrameType.CANCEL_PUSH, it); VarInt.encode(0, it) }
+        assertEquals(FrameError.Malformed(FrameType.CANCEL_PUSH), assertFailsWith<FrameException> { FrameDecoder().decode(empty) }.error)
+        // DATA, HEADERS and unknown frames are unaffected on a request stream.
+        val ok = Buffer().also { it.writeBytes(encoded(Frame.headers("h"), data("d"))) }
+        val d = FrameDecoder(requestStream = true)
+        assertIs<Frame.Headers>(d.decode(ok))
+        assertIs<Frame.Data>(d.decode(ok))
+    }
 }

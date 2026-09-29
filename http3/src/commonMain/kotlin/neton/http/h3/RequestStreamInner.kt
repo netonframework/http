@@ -45,7 +45,7 @@ internal class RequestStreamInner(
     val id: StreamId get() = send?.sendId ?: recv!!.recvId
 
     /** The received frames; the head may already have been read through it. */
-    val frames = FrameStream(config.maxHeadersFrameSize)
+    val frames = FrameStream(config.maxHeadersFrameSize, requestStream = true)
 
     private val decoder = Decoder(config.maxFieldSectionSize, config.maxFieldCount)
     private var encoder: Encoder? = null

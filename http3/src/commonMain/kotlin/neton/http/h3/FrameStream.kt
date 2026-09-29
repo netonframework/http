@@ -38,10 +38,19 @@ internal const val PAYLOAD_COPY_LIMIT: Int = 16 * 1024
  *   ([FrameError.Malformed]). The reference reads the varint and leaves any extra payload bytes in the stream, to be
  *   parsed as the next frame, and waits forever on an empty payload.
  * - HTTP/2-only frame types are rejected as soon as their header is read, not after their payload is buffered.
+ * - With [requestStream], the control-stream frame types SETTINGS, CANCEL_PUSH, GOAWAY and MAX_PUSH_ID are rejected
+ *   as soon as their header is read ([FrameError.Unexpected], H3_FRAME_UNEXPECTED; RFC 9114 §7.2.3–7.2.7: such a
+ *   frame on any other stream is H3_FRAME_UNEXPECTED), before their payload is examined: a malformed CANCEL_PUSH on a
+ *   request stream is H3_FRAME_UNEXPECTED, not H3_FRAME_ERROR (h3spec, "CANCEL_PUSH in a request stream"). The
+ *   reference decodes the payload first and checks the type afterwards.
  *
  * Not thread-safe.
  */
-class FrameDecoder(maxHeadersFrameSize: Int = DEFAULT_MAX_HEADERS_FRAME_SIZE) {
+class FrameDecoder(
+    maxHeadersFrameSize: Int = DEFAULT_MAX_HEADERS_FRAME_SIZE,
+    /** Whether this decodes a request stream, where control-stream frame types are rejected from the header. */
+    private val requestStream: Boolean = false,
+) {
     /** The largest HEADERS / PUSH_PROMISE payload accepted, in bytes. */
     var maxHeadersFrameSize: Int = maxHeadersFrameSize
         set(value) {
@@ -124,9 +133,14 @@ class FrameDecoder(maxHeadersFrameSize: Int = DEFAULT_MAX_HEADERS_FRAME_SIZE) {
             }
             FrameType.HEADERS, FrameType.PUSH_PROMISE ->
                 if (len > maxHeadersFrameSize) throw FrameException(FrameError.HeadersTooLarge(type, len, maxHeadersFrameSize))
-            FrameType.SETTINGS -> if (len > MAX_SETTINGS_PAYLOAD) throw FrameException(FrameError.TooLarge(type, len))
-            FrameType.CANCEL_PUSH, FrameType.GOAWAY, FrameType.MAX_PUSH_ID ->
+            FrameType.SETTINGS -> {
+                if (requestStream) throw FrameException(FrameError.Unexpected(type))
+                if (len > MAX_SETTINGS_PAYLOAD) throw FrameException(FrameError.TooLarge(type, len))
+            }
+            FrameType.CANCEL_PUSH, FrameType.GOAWAY, FrameType.MAX_PUSH_ID -> {
+                if (requestStream) throw FrameException(FrameError.Unexpected(type))
                 if (len > VarInt.MAX_SIZE) throw FrameException(FrameError.Malformed(type))
+            }
             // RFC 9114 §7.2.8: HTTP/2 frame types must not be received (H3_FRAME_UNEXPECTED).
             FrameType.H2_PRIORITY, FrameType.H2_PING, FrameType.H2_WINDOW_UPDATE, FrameType.H2_CONTINUATION ->
                 throw FrameException(FrameError.UnsupportedFrame(type))
@@ -210,11 +224,15 @@ class FrameDecoder(maxHeadersFrameSize: Int = DEFAULT_MAX_HEADERS_FRAME_SIZE) {
  *
  * Not thread-safe.
  */
-class FrameStream(maxHeadersFrameSize: Int = DEFAULT_MAX_HEADERS_FRAME_SIZE) {
+class FrameStream(
+    maxHeadersFrameSize: Int = DEFAULT_MAX_HEADERS_FRAME_SIZE,
+    /** A request stream: see [FrameDecoder]'s `requestStream`. */
+    requestStream: Boolean = false,
+) {
     /** The received bytes not yet decoded; the transport may read into it directly. */
     val buffer: Buffer = Buffer()
 
-    private val decoder = FrameDecoder(maxHeadersFrameSize)
+    private val decoder = FrameDecoder(maxHeadersFrameSize, requestStream)
 
     /** Whether the end of the stream was received ([onEnd]); buffered bytes may remain. */
     var isEos: Boolean = false

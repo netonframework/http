@@ -499,6 +499,25 @@ abstract class RequestTest {
         }
     }
 
+    /**
+     * ⚖️ A control-stream frame type on a request stream is H3_FRAME_UNEXPECTED whatever its payload: a CANCEL_PUSH,
+     * GOAWAY or MAX_PUSH_ID whose payload is not one varint (empty, or with an extra byte), and a SETTINGS with a
+     * truncated identifier, are rejected from the frame header rather than as H3_FRAME_ERROR / H3_SETTINGS_ERROR
+     * (h3spec "MUST send H3_FRAME_UNEXPECTED if CANCEL_PUSH is received in a request stream [HTTP/3 7.2.5]").
+     */
+    @Test
+    fun request_malformed_control_frame_is_unexpected() {
+        for (type in listOf(FrameType.CANCEL_PUSH, FrameType.GOAWAY, FrameType.MAX_PUSH_ID)) {
+            requestSequenceUnexpected { it.request(postRequest()).varint(type).varint(0) }
+            requestSequenceUnexpected { it.request(postRequest()).varint(type).varint(2).bytes(1, 0) }
+        }
+        requestSequenceUnexpected { it.request(postRequest()).varint(FrameType.SETTINGS).varint(1).bytes(0x40) }
+    }
+
+    @Test
+    fun request_malformed_cancel_push_first_is_unexpected() =
+        requestSequenceUnexpected { it.varint(FrameType.CANCEL_PUSH).varint(0) }
+
     @Test
     fun request_invalid_data_after_trailers() = requestSequenceUnexpected {
         it.request(postRequest()).trailers(headers("trailer" to "value")).frameWithPayload(dataFrame("fada"))
@@ -519,10 +538,21 @@ abstract class RequestTest {
         it.request(postRequest()).frameWithPayload(dataFrame("fada")).trailers(headers("trailer" to "value")).bytes(255)
     }
 
+    /**
+     * A DATA frame declaring 5 bytes but carrying 4 takes the trailers frame's type byte as its last byte, and the
+     * trailers frame's length byte is then read as the next frame type: 0x0d, MAX_PUSH_ID, for this block. The
+     * reference expects H3_FRAME_ERROR, from failing to decode that MAX_PUSH_ID's empty payload. ⚖️ Here a control-stream
+     * frame type on a request stream is H3_FRAME_UNEXPECTED from its header, whatever its payload (RFC 9114 §7.2.7;
+     * h3spec, see `request_malformed_control_frame_is_unexpected`), so the misframing ends in H3_FRAME_UNEXPECTED.
+     */
     @Test
-    fun request_invalid_data_frame_length_too_large() = requestSequenceFrameError {
-        it.request(postRequest()).varint(FrameType.DATA).varint(5).bytes(*"fada".encodeToByteArray().map { b -> b.toInt() }.toIntArray())
-            .trailers(headers("trailer" to "value"))
+    fun request_invalid_data_frame_length_too_large() {
+        val trailers = Buffer().trailers(headers("trailer" to "value")).toBytes()
+        assertEquals(FrameType.MAX_PUSH_ID, trailers[1].toLong(), "the byte read as the next frame type")
+        requestSequenceUnexpected {
+            it.request(postRequest()).varint(FrameType.DATA).varint(5).bytes(*"fada".encodeToByteArray().map { b -> b.toInt() }.toIntArray())
+                .trailers(headers("trailer" to "value"))
+        }
     }
 
     @Test
