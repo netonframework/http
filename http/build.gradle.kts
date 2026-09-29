@@ -1,4 +1,4 @@
-plugins { kotlin("multiplatform") }
+plugins { kotlin("multiplatform"); `maven-publish` }
 
 // Same targets as com.netonstream:io (resolved from mavenLocal until 0.2.0 is on Maven Central).
 kotlin {
