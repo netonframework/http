@@ -2,8 +2,9 @@
 
 HTTP for Kotlin/Native on top of `com.netonstream:io`. The first version replicates the capabilities of pinned Rust
 references: `http` 1.5.0 (common types), `httparse` 1.10.1 and hyper 1.11.1 (HTTP/1.1), `h2` 0.4.19 and hyper's
-HTTP/2 wiring, and `h3` 0.0.8 (HTTP/3 over `com.netonstream:quic`, in the separate artifact `com.netonstream:http3`).
-Packages: `neton.http` (types), `neton.http.h1`, `neton.http.h2`, `neton.http.h3`.
+HTTP/2 wiring. HTTP/3 (`h3` 0.0.8 over `com.netonstream:quic`) is the separate repository
+[http3](https://github.com/netonframework/http3) (`com.netonstream:http3`). Packages: `neton.http` (types),
+`neton.http.h1`, `neton.http.h2`.
 
 Specification, every deliberate difference from the references (marked ⚖️), and the implementation record with all
 measurements: [SPEC.md](SPEC.md).
@@ -19,7 +20,7 @@ targets only (Linux, macOS, iOS, Android native, Windows mingw).
 | HTTP/1.1 server and client (hyper `conn::http1`) | done; hyper's `tests/server.rs`, `tests/client.rs`, `tests/integration.rs` ported |
 | HTTP/2 server and client (h2 + hyper `conn::http2`) | done; h2's `tests/h2-tests` and hyper's HTTP/2 tests ported |
 | Upgrades, CONNECT and extended CONNECT tunnels | done |
-| HTTP/3 (h3 0.0.8 over `com.netonstream:quic`, artifact `com.netonstream:http3`) | accepted for v1: h3's tests ported; interop over real TLS 1.3 in both directions with h3 0.0.8 + h3-quinn (its own examples and a peer on the same crates: GET, POST, 16 MiB bodies, 150 requests per connection, trailers, GOAWAY, close) and with aioquic in both directions (GREASE on); h3spec 49 / 49. ⚖️ the one GREASE frame per connection follows a head instead of preceding FIN, which aioquic's client needs. Not yet: quiche / curl not tested, no loss or performance runs over real TLS (SPEC §11) |
+| HTTP/3 | in the separate repository [http3](https://github.com/netonframework/http3) (`com.netonstream:http3`, `neton.http.h3`) |
 | Connection pooling, protocol auto-detection (hyper-util) | out of scope for this version |
 
 ## Conformance and tests
@@ -28,8 +29,6 @@ targets only (Linux, macOS, iOS, Android native, Windows mingw).
   (`NETON_HTTP_TEST_TRANSPORT=tcp`), with the epoll and io_uring drivers on Linux. The exception is h2's mock-based
   tests, which stay in memory (SPEC §11).
 - h2spec 2.1.1: 145 / 145 against the HTTP/2 server.
-- h3spec 0.1.13: 49 / 49 against the HTTP/3 server over real TLS. HTTP/3 interop peers and scripts:
-  `http3-interop/` (not published).
 - curl interop, HTTP/1.x and h2c: `http-bench/curl-interop.sh`.
 - Fuzz targets of `httparse`, `http` and `h2` ported as seeded tests with coverage floors.
 - End-to-end acceptance: every split point of pipelined requests, request-smuggling vectors, and a 100 MB streamed
@@ -75,46 +74,7 @@ runReactor {
 HTTP/2 client: `neton.http.h2.http2Handshake(stream)` with an absolute URI. `SendRequest.clone()` gives one sender per
 concurrent stream.
 
-HTTP/3 (`neton.http.h3`) runs on a `neton.quic` connection whose TLS handshake negotiated ALPN "h3". The TLS
-configuration is `neton.quic.proto`'s TLS 1.3 session (OpenSSL): the server gives its certificate chain and key, the
-client gives its trust anchors explicitly (there is no system trust store), and both offer `ALPN_H3`:
-
-```kotlin
-// Server
-val tls = TlsServerConfig(Certificates.pem(chainPem), PrivateKey.pem(keyPem), alpnProtocols = listOf(ALPN_H3))
-val endpoint = Endpoint.create(EndpointConfig.default(), ServerConfig.withCrypto(tls), bindUdp(address))
-while (true) {
-    val quic = endpoint.accept()?.await() ?: break
-    launch {
-        val conn = neton.http.h3.server.newConnection(quic.asH3())
-        while (true) {
-            val (request, stream) = conn.accept()?.resolveRequest() ?: break
-            stream.use {   // close() releases the QUIC stream, as dropping it does in h3
-                it.sendResponse(Response.builder().status(200).body(Unit))
-                it.sendData(Bytes.copyOf("hello".encodeToByteArray()))
-                it.finish()
-            }
-        }
-    }
-}
-
-// Client
-val tls = TlsClientConfig(trustAnchors = Certificates.pem(caPem), alpnProtocols = listOf(ALPN_H3))
-val quic = clientEndpoint.connectWith(ClientConfig(tls), serverAddress, "example.com").await()
-val (driver, sender) = neton.http.h3.client.newClient(quic.asH3())
-launch { driver.run() }
-val stream = sender.sendRequest(Request.get("https://example.com/").body(Unit))
-stream.finish()
-val response = stream.recvResponse()
-while (true) stream.recvData() ?: break
-```
-
-Close each server `RequestStream` when done with it (`use { }`): it is h3's `Drop`. Until then a request whose body
-was not read to its end keeps its QUIC stream, and with it one of the client's stream credits (100 concurrent
-bidirectional streams by default), so a server that never closes them stops accepting requests on that connection.
-
-A server certificate that does not chain to the client's trust anchors or does not match the server name fails the
-handshake, as does a peer without "h3". The KDoc of `neton.http.h3.quic.ALPN_H3` has the details.
+HTTP/3: see the [http3](https://github.com/netonframework/http3) repository.
 
 Complete programs: `http-bench/src/nativeMain/kotlin/neton/http/bench/` (`HelloServer.kt`, `EchoServer.kt`,
 `HelloClient.kt`).
