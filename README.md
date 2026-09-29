@@ -19,7 +19,7 @@ targets only (Linux, macOS, iOS, Android native, Windows mingw).
 | HTTP/1.1 server and client (hyper `conn::http1`) | done; hyper's `tests/server.rs`, `tests/client.rs`, `tests/integration.rs` ported |
 | HTTP/2 server and client (h2 + hyper `conn::http2`) | done; h2's `tests/h2-tests` and hyper's HTTP/2 tests ported |
 | Upgrades, CONNECT and extended CONNECT tunnels | done |
-| HTTP/3 (h3 0.0.8 over `com.netonstream:quic`, artifact `com.netonstream:http3`) | implemented; h3's connection and request tests ported and run in memory, over neton.quic with the TLS test double and over neton.quic with real TLS 1.3; interop with external implementations: see SPEC §11 |
+| HTTP/3 (h3 0.0.8 over `com.netonstream:quic`, artifact `com.netonstream:http3`) | accepted for v1: h3's tests ported; interop over real TLS 1.3 in both directions with h3 0.0.8 + h3-quinn (its own examples and a peer on the same crates: GET, POST, 16 MiB bodies, 150 requests per connection, trailers, GOAWAY, close) and with aioquic; h3spec 49 / 49. Not yet: aioquic's client hangs on a GREASE frame just before FIN (its bug; h3 behaves the same), quiche / curl not tested, no loss or performance runs (SPEC §11) |
 | Connection pooling, protocol auto-detection (hyper-util) | out of scope for this version |
 
 ## Conformance and tests
@@ -28,6 +28,8 @@ targets only (Linux, macOS, iOS, Android native, Windows mingw).
   (`NETON_HTTP_TEST_TRANSPORT=tcp`), with the epoll and io_uring drivers on Linux. The exception is h2's mock-based
   tests, which stay in memory (SPEC §11).
 - h2spec 2.1.1: 145 / 145 against the HTTP/2 server.
+- h3spec 0.1.13: 49 / 49 against the HTTP/3 server over real TLS. HTTP/3 interop peers and scripts:
+  `http3-interop/` (not published).
 - curl interop, HTTP/1.x and h2c: `http-bench/curl-interop.sh`.
 - Fuzz targets of `httparse`, `http` and `h2` ported as seeded tests with coverage floors.
 - End-to-end acceptance: every split point of pipelined requests, request-smuggling vectors, and a 100 MB streamed

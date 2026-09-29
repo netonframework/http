@@ -416,10 +416,10 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
 
 ## 5. HTTP/3（复刻 `h3` 0.0.8，在 `neton.quic` 上）
 
-> **状态：第 1 层（纯编解码，阶段 A）、第 2 层（连接层接在薄 QUIC 接口上、以内存替身测试，阶段 B）与第 3 层（接到 `neton.quic`、
-> 端到端测试，阶段 C，握手仍为 TLS 测试替身）已实现；互通（阶段 D）尚未实现，HTTP/3 尚未验收（2026-09-29）。** 本节的 ✅ 表示"已与参考对照、决定照做"，
-> 不表示已实现；实现进度见 §11。
-> 依赖的 QUIC 仍以 TLS 测试替身运行（quic SPEC §11.5–11.8），真实 TLS 未接入；HTTP/3 的最终验收以真实 QUIC 与外部 HTTP/3 实现互通为准。
+> **状态：四层均已实现并验收（2026-09-29）：第 1 层（纯编解码，阶段 A）、第 2 层（连接层接在薄 QUIC 接口上、以内存替身测试，阶段 B）、
+> 第 3 层（接到 `neton.quic` 的端到端测试，阶段 C）与第 4 层（真实 TLS 1.3 上与参考 h3 0.0.8 双向互通、与 aioquic 互通、h3spec 49 / 49，
+> 阶段 D）。** 本节的 ✅ 表示"已与参考对照、决定照做"；实现与验收记录见 §11。仍未完成：aioquic 客户端在 GREASE 开启时挂住（aioquic 的
+> 缺陷，§11 阶段 D），quiche / curl 未测，丢包与乱序下的互通、性能对照未做。
 
 - **首版范围（评审确定，2026-09-29）**：
   - 客户端与服务端；普通请求、流式消息体、trailer、取消（请求流 reset / stop）、GOAWAY 与优雅关闭。
@@ -503,8 +503,8 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   | QPACK 容量上限 | 参考未接入动态表 | 适用：本库通告容量 0，对端写入超出容量的指令应以 QPACK_ENCODER_STREAM_ERROR 拒绝 | 必须通过；另加单元测试 |
   | Insert Count Increment 为 0 | 同上 | 适用：应以 QPACK_DECODER_STREAM_ERROR 拒绝 | 必须通过；另加单元测试 |
   | 重复的伪头部 | 参考不校验 | 适用：本库补上此项校验（§5） | 必须通过 |
-  | missing_extension TLS 告警 | 取决于 TLS 实现 | 取决于 `quic` 的 TLS 选择（`quic` SPEC §4） | TLS 选定后必须通过；在此之前记为未验证，不记为豁免 |
-  h2spec 在参考中没有跳过项，本库全部必须通过。
+  | missing_extension TLS 告警 | 取决于 TLS 实现 | 取决于 `quic` 的 TLS 选择（`quic` SPEC §4） | TLS 选定后必须通过；在此之前记为未验证，不记为豁免。**已通过**（quic 真实 TLS，§11 阶段 D） |
+  h2spec 在参考中没有跳过项，本库全部必须通过。h3spec v0.1.13 对本库服务端 49 / 49 通过，上表五项均在其中（§11 阶段 D）。
 - **有意不同项各有测试**：§3.9 表中每一行加粗的默认值；§5 补上的四项头部校验；§5 的三种头部上限（每种在编码 / 解码的逐步检查中触发）。
 - **修订 3 的请求走私向量**逐个断言。
 - **每个字节边界拆分到达**的模糊测试。
@@ -1143,3 +1143,86 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   - 客户端 `sendRequest` 在返回句柄前负责已打开的流：失败或取消时复位发送半边、停止接收半边；`openBi` 挂起后再次检查 GOAWAY 与发送器关闭。
   - 新增测试先在旧实现上确认失败。macOS：http3 378、http 1197（14 忽略）；153 两种驱动：http3 378、http 1198（14 忽略）全过。
 
+**HTTP/3 阶段 D：真实 TLS、与外部 HTTP/3 实现双向互通、h3spec（2026-09-29，h3 0.0.8，§5 分层验收第 4 层）**
+- 依赖：`com.netonstream:quic` / `quic-testkit` 0.1.0-SNAPSHOT，带真实 TLS 1.3 会话（`TlsClientConfig` / `TlsServerConfig`，OpenSSL 4.0.2，
+  quic SPEC §4、§11.9）。153 上的 quic 取自 quic 提交 138fcc9：发布其 linuxX64 产物（`:quic:publishLinuxX64PublicationToMavenLocal
+  :quic-testkit:publishLinuxX64PublicationToMavenLocal`），根模块从 macOS 的 mavenLocal 复制（同阶段 C 的第 2 条）。
+- **测试框架接入真实 TLS**：`NetonQuicSupport` 的 `quicLoopback(tls)` 可选 `TestTls.REAL`（真实会话：进程内由 quic-testkit 的 `TestPki`
+  生成测试 CA 及其为 localhost / 127.0.0.1 / ::1 签发的服务端证书；服务端配证书链与私钥、ALPN h3；客户端**只**信任该 CA、ALPN h3）或
+  `TestTls.MOCK`（原 TLS 替身）。两种都保留：`EndToEndTestTls` / `EndToEndTestMock`，`ConnectionTestQuicTls`、`RequestTestQuicTls`、
+  `ConnectionLayerTestQuicTls` 与原 `…Quic`（替身）、`…Memory`（内存替身）并存。握手后按 `TlsHandshakeData.protocol` 核对 ALPN 为 h3。
+  新增：只信任另一 CA 的客户端 → 握手失败，CRYPTO_ERROR 0x130（unknown_ca）。阶段 C 的全部场景在真实 TLS 上直接通过，无需改库。
+- **应用文档**：`ALPN_H3` 的 KDoc 与 README 给出 HTTP/3 的 TLS 配置（服务端证书链 + 私钥 + ALPN h3；客户端显式信任锚 + ALPN h3；
+  无系统信任库；服务器名按证书的 DNS 名 / IP 核对）。
+- **互通用可执行文件**（不进入生产产物）：新模块 `http3-interop`（`h3interop`，linuxX64 / macosArm64）：`server <ip:port> <cert> <key>`
+  （PEM 或 DER，文件读入），`client <ip:port> <server name> <ca> <peer|basic|example>`。路由：`GET /`、`GET /size/<n>`（按
+  `(i*31+7)%251` 的模式字节）、`POST /echo`（边收边回显；请求带 trailer 时响应 trailer 为 `x-echo-<name>` 与 `x-body-length`）、
+  `GET /goaway`（`shutdown(0)` 后回 200）、其余 404。客户端场景：get、not-found、post（1,152 字节回显）、large-upload-echo（16 MiB
+  上传同时读回显、逐字节核对）、large-download（16 MiB）、同一连接 100 并发 + 50 顺序请求、trailers（双向）、server-goaway（进行中的
+  请求完成、之后的新请求被拒 RemoteClosing、连接以 H3_NO_ERROR 结束）、第二条连接上的 client-goaway-and-close。`NETON_H3_GREASE=0`
+  关闭 GREASE（`sendGrease(false)`）。
+  - 参考一侧：h3 0.0.8 源码树本身的 `examples/server.rs` 与 `examples/client.rs`（h3-quinn 0.0.9、quinn 0.11.12 / quinn-proto 0.11.18、
+    rustls 0.23.45 ring、tokio 1.53.1），只做 GET（服务端按目录提供文件，客户端每次一个请求）；其余场景用 `http3-interop/h3-peer`
+    （同样的 h3 / h3-quinn 源码，路由与场景与本库一致，`Cargo.lock` 已提交）。
+  - 独立实现：aioquic 1.2.0（Python，自带 QUIC、TLS 与 HTTP/3，QPACK 用 pylsqpack 0.3.22），`pip` 装入 `/root/bench/h3-interop/venv`；
+    用其源码包中的 `examples/http3_server.py`（配本库的 ASGI 应用 `http3-interop/aioquic/neton_routes.py`，无法表达 trailer 与 GOAWAY，
+    本库客户端用 `basic` 场景）与 `examples/http3_client.py`。
+  - quiche（cloudflare）未做：其 BoringSSL 构建需要 cmake 与 C++ 编译器，153 上两者都没有，安装即系统改动；curl `--http3` 需要自建
+    ngtcp2 / nghttp3 与支持 QUIC 的 TLS 库，同样超出"不改系统"的范围。第二个独立实现以 aioquic 代替。
+- 命令（153，Rocky 9.8，`kernel.io_uring_disabled = 0`；目录 `/root/bench/h3-interop`，h3 源码树在 `h3-0.0.8/`、`h3-peer/` 与之并列）：
+  `./gen-certs.sh`（openssl 命令行生成一次性 CA 与 localhost / 127.0.0.1 服务端证书，另生成 DER 供 h3 示例、另一无关 CA 供拒绝用例）；
+  `CARGO_TARGET_DIR=../target cargo build -j 2 --release --example server --example client`（在 `h3-0.0.8/`）与 `cargo build -j 2 --release`
+  （在 `h3-peer/`）；`./gradlew --no-daemon --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1g :http3-interop:linkH3interopDebugExecutableLinuxX64`；
+  `./run-interop.sh <h3interop.kexe> 24900`；`./run-interop-aioquic.sh <h3interop.kexe> 24920`；
+  `./h3spec-linux-x86_64 127.0.0.1 24940 -n -t 3000`（本库服务端默认配置、GREASE 开、不跳过任何用例；`-n` 是 h3spec 不校验证书，
+  它没有指定 CA 的选项）。153 上始终只运行一个重型任务（构建与 cargo 串行，`systemd-run` 与登录会话脱离），结束后无残留进程。
+- 结果（153，最后一次完整运行；此前各轮结果相同，除下文修复之前的失败）：
+
+  | 方向 | 对端 | 结果 |
+  |---|---|---|
+  | 本库客户端 → h3 `examples/server.rs` | h3 0.0.8 + h3-quinn | 通过：GET 小文件、404、16 MiB 文件逐字节核对、同一连接 100 并发 + 50 顺序、POST（示例服务端不读请求体，照常 200）、关闭（H3_NO_ERROR） |
+  | h3 `examples/client.rs` → 本库服务端 | h3 0.0.8 + h3-quinn | 通过：`GET /` 200、`GET /size/16777216` 与模式文件一致（cmp）、`GET /missing` 404，每次以 H3_NO_ERROR 关闭；只信任另一 CA 时客户端报 UnknownIssuer，本库服务端记录握手失败后继续服务 |
+  | 本库客户端 → h3-peer 服务端 | h3 0.0.8 + h3-quinn | 9 / 9 通过：get、not-found、post、16 MiB 上传回显、16 MiB 下载、100 + 50 请求、双向 trailer、服务端 GOAWAY（见下）、客户端 GOAWAY 与关闭 |
+  | h3-peer 客户端 → 本库服务端 | h3 0.0.8 + h3-quinn | 9 / 9 通过（同上；服务端 GOAWAY 后本库服务端在最后一个请求完成时以 H3_NO_ERROR 关闭连接） |
+  | 本库客户端（只信任另一 CA）→ h3-peer 服务端 | h3-quinn / rustls | 按预期失败：本库 Transport(CRYPTO_ERROR 0x130，certificate verify failed)，h3-peer 看到对端以告警 48 中止 |
+  | 本库客户端 → aioquic `http3_server.py` | aioquic 1.2.0 | 7 / 7 通过（basic：get、not-found、post、16 MiB 上传回显、16 MiB 下载、100 + 50 请求、关闭） |
+  | aioquic `http3_client.py` → 本库服务端，GREASE 开（默认，同 h3） | aioquic 1.2.0 | **不通过**：每条连接上第一个完成的响应永远等不到结束（`timeout 60` 退出 124）；同连接的其他请求正常（16 MiB 一致、404） |
+  | aioquic `http3_client.py` → 本库服务端，`NETON_H3_GREASE=0` | aioquic 1.2.0 | 通过：同一连接 GET / + 16 MiB + 404、POST 回显、100 KiB POST 回显 |
+
+  - 服务端 GOAWAY 的结束方式两边不同，均合 RFC 9114 §5.2：h3 0.0.8 的 `accept()` 只在**收到**对端 GOAWAY（`recv_closing`）且无进行中请求
+    时返回 None，自己发出 GOAWAY 后不主动关闭，等客户端关闭；本库服务端在自己的 GOAWAY 之后、最后一个请求完成时关闭（H3_NO_ERROR）。
+    两个客户端的场景因此都接受"服务端关闭"或"3 s 内未关闭则客户端以 H3_NO_ERROR 关闭"，并记录是哪一种。
+  - **aioquic 与 GREASE 的问题在 aioquic**：`H3Connection._handle_request_or_push_frame` 对未知（保留）类型的帧不产生事件，而流结束
+    （`stream_ended`）只随 DATA / HEADERS 事件报告；当 GREASE 帧是 FIN 之前的最后一帧并与 FIN 同到时，结束被丢掉，客户端一直等待。
+    h3 0.0.8 在每条连接第一次 `finish` 前发一个 GREASE 帧，本库照做（§5）。交叉验证：aioquic 客户端对 h3-peer（h3 本身）服务端的
+    `GET /` 同样挂住（15 s 超时），第二个请求正常。RFC 9114 §9 要求忽略未知帧类型，故不改本库；关闭 GREASE 即可互通。是否为这类对端
+    改变 GREASE 帧的位置（例如放在 HEADERS 之后而非紧贴 FIN），留作待决。
+- **h3spec v0.1.13**（Linux 二进制，SHA-256 3664209a…e255）对本库服务端：**49 / 49 通过，连续 3 次**；不跳过任何用例。§6 表中参考跳过的
+  五项全部通过：请求流上的 CANCEL_PUSH → H3_FRAME_UNEXPECTED（修复后，见下）、重复伪头部 → H3_MESSAGE_ERROR、动态表容量超限 →
+  QPACK_ENCODER_STREAM_ERROR、Insert Count Increment 为 0 → QPACK_DECODER_STREAM_ERROR、缺 quic_transport_parameters 扩展 →
+  missing_extension 告警（quic 的真实 TLS，两项）。其余：QUIC 服务端 34 项（流量控制、流数上限、传输参数、帧编码、保留位、各帧的流状态、
+  KeyUpdate、no_application_protocol、EndOfEarlyData 等）与 HTTP/3 服务端 15 项全部通过。说明：`CRYPTO in 0-RTT` 一项 h3spec 标为通过，
+  但同时提示 "0-RTT is not possible. Skipping this test"——quic 不做 0-RTT（quic SPEC §11.9），该项实际未被检验。
+- **修复**（均先在旧实现上确认新测试失败）：
+  1. h3spec 第一次运行 48 / 49：请求流上的 CANCEL_PUSH，本库回 H3_FRAME_ERROR（0x106，"frame 0x3 is malformed"），应为 H3_FRAME_UNEXPECTED。
+     原因：帧解码器先按布局校验 CANCEL_PUSH 的负载（必须恰为一个 varint），请求流对帧类型的检查在其后；h3spec 发来的 CANCEL_PUSH 负载
+     不合布局，于是先报 FRAME_ERROR。⚖️ 改为：请求流的解码器（`FrameDecoder(requestStream = true)`）读到帧头即拒绝控制流专用类型
+     SETTINGS、CANCEL_PUSH、GOAWAY、MAX_PUSH_ID（`FrameError.Unexpected`，H3_FRAME_UNEXPECTED，RFC 9114 §7.2.3–7.2.7），不看负载。
+     参考先解码再查类型（且对空负载一直等待），它在 CI 中跳过此项。新增测试：`FrameStreamTest.requestStreamRejectsControlFramesFromTheHeader`、
+     `RequestTest.request_malformed_control_frame_is_unexpected` 与 `request_malformed_cancel_push_first_is_unexpected`（内存、替身 QUIC、
+     真实 TLS 各一份）。移植的 `request_invalid_data_frame_length_too_large` 随之改变：DATA 声明 5 字节只带 4 字节，吞掉 trailer 帧的类型字节，
+     trailer 帧的长度字节 0x0d 被当作下一帧类型（MAX_PUSH_ID）；参考因解不出其空负载得 H3_FRAME_ERROR，本库按上面的规则得
+     H3_FRAME_UNEXPECTED。测试断言该字节确为 0x0d 并期望 H3_FRAME_UNEXPECTED。
+  2. 互通发现的用法问题（不是协议错误，已写入文档与测试）：本库互通服务端最初处理 GET 后不 `close()` 服务端 `RequestStream`，请求的 FIN
+     始终未读，QUIC 流不释放，客户端的双向流额度（默认 100）用完后同一连接上的请求全部停住（本机 95 个请求后空闲超时）。服务端
+     `RequestStream.close()` 就是参考的 `Drop`（停止未读完的接收半边，释放流）；Rust 在丢弃时自动发生，Kotlin 须显式 `close()` / `use {}`。
+     互通服务端改用 `use {}`；`RequestStream.close` 的 KDoc 与 README 的服务端示例写明；新增端到端测试
+     `request_streams_hold_their_quic_streams_until_closed`（真实 TLS 与替身各一份）：100 个未关闭的请求之后第 101 个等待流额度，关闭后继续，
+     其后逐个关闭的 150 个请求全部完成。
+- 测试数：macOS（`./gradlew :http3:macosArm64Test`）498 个全部通过（阶段 C 评审修复后的 378 + 真实 TLS 上再跑的连接层 99 与端到端 11 +
+  不受信任证书 1 + 请求流上的控制帧 2 × 3 种传输 + 帧解码 1 + 流释放 2 × 2 种 TLS；另有 `request_invalid_data_frame_length_too_large` 的期望改变）；153
+  （`http3/build/bin/linuxX64/debugTest/test.kexe`）`NETON_IO_DRIVER=epoll` 与 `iouring` 各 498 个全部通过。`:http` 未改。
+- 验收结论：按 §5 第 4 层与本节的判据，**HTTP/3 首版验收通过**：真实 TLS 上与参考 h3 0.0.8（含其自带示例）双向互通全部通过，h3spec
+  必须通过的各项（含 §6 表中五项）全部通过。**仍未完成 / 限制**：aioquic 客户端在 GREASE 开启时挂住（aioquic 的缺陷，见上；关闭 GREASE
+  可互通）；quiche 与 curl `--http3` 未测（153 无 C++ 编译器与 cmake）；h3spec 的 0-RTT 项未实际检验（无 0-RTT）；互通均在本机回环上，
+  无丢包与乱序；未做性能对照与 quic-interop-runner；`http-bench` 仍无 HTTP/3 压测程序；互通可执行文件只构建了 linuxX64 与 macosArm64。
