@@ -2,7 +2,12 @@ pluginManagement {
     repositories { gradlePluginPortal(); mavenCentral() }
 }
 dependencyResolutionManagement {
-    repositories { mavenLocal(); mavenCentral() }
+    repositories {
+        providers.gradleProperty("releaseRepositories").orNull?.split(",")?.forEach { path ->
+            maven { url = uri(path) }
+        }
+        mavenCentral()
+    }
 }
 rootProject.name = "http-build"
 // com.netonstream:http (neton.http, neton.http.header, neton.http.uri, neton.http.h1, neton.http.h2). SPEC §1.
