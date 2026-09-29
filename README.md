@@ -2,8 +2,8 @@
 
 HTTP for Kotlin/Native on top of `com.netonstream:io`. The first version replicates the capabilities of pinned Rust
 references: `http` 1.5.0 (common types), `httparse` 1.10.1 and hyper 1.11.1 (HTTP/1.1), `h2` 0.4.19 and hyper's
-HTTP/2 wiring. HTTP/3 (`h3` 0.0.8 over `com.netonstream:quic`) is specified but not started: it waits for QUIC's TLS
-integration. Packages: `neton.http` (types), `neton.http.h1`, `neton.http.h2`.
+HTTP/2 wiring, and `h3` 0.0.8 (HTTP/3 over `com.netonstream:quic`, in the separate artifact `com.netonstream:http3`).
+Packages: `neton.http` (types), `neton.http.h1`, `neton.http.h2`, `neton.http.h3`.
 
 Specification, every deliberate difference from the references (marked ⚖️), and the implementation record with all
 measurements: [SPEC.md](SPEC.md).
@@ -19,7 +19,7 @@ targets only (Linux, macOS, iOS, Android native, Windows mingw).
 | HTTP/1.1 server and client (hyper `conn::http1`) | done; hyper's `tests/server.rs`, `tests/client.rs`, `tests/integration.rs` ported |
 | HTTP/2 server and client (h2 + hyper `conn::http2`) | done; h2's `tests/h2-tests` and hyper's HTTP/2 tests ported |
 | Upgrades, CONNECT and extended CONNECT tunnels | done |
-| HTTP/3 | not started (blocked on QUIC TLS) |
+| HTTP/3 (h3 0.0.8 over `com.netonstream:quic`, artifact `com.netonstream:http3`) | implemented; h3's connection and request tests ported and run in memory, over neton.quic with the TLS test double and over neton.quic with real TLS 1.3; interop with external implementations: see SPEC §11 |
 | Connection pooling, protocol auto-detection (hyper-util) | out of scope for this version |
 
 ## Conformance and tests
@@ -72,6 +72,41 @@ runReactor {
 
 HTTP/2 client: `neton.http.h2.http2Handshake(stream)` with an absolute URI. `SendRequest.clone()` gives one sender per
 concurrent stream.
+
+HTTP/3 (`neton.http.h3`) runs on a `neton.quic` connection whose TLS handshake negotiated ALPN "h3". The TLS
+configuration is `neton.quic.proto`'s TLS 1.3 session (OpenSSL): the server gives its certificate chain and key, the
+client gives its trust anchors explicitly (there is no system trust store), and both offer `ALPN_H3`:
+
+```kotlin
+// Server
+val tls = TlsServerConfig(Certificates.pem(chainPem), PrivateKey.pem(keyPem), alpnProtocols = listOf(ALPN_H3))
+val endpoint = Endpoint.create(EndpointConfig.default(), ServerConfig.withCrypto(tls), bindUdp(address))
+while (true) {
+    val quic = endpoint.accept()?.await() ?: break
+    launch {
+        val conn = neton.http.h3.server.newConnection(quic.asH3())
+        while (true) {
+            val (request, stream) = conn.accept()?.resolveRequest() ?: break
+            stream.sendResponse(Response.builder().status(200).body(Unit))
+            stream.sendData(Bytes.copyOf("hello".encodeToByteArray()))
+            stream.finish()
+        }
+    }
+}
+
+// Client
+val tls = TlsClientConfig(trustAnchors = Certificates.pem(caPem), alpnProtocols = listOf(ALPN_H3))
+val quic = clientEndpoint.connectWith(ClientConfig(tls), serverAddress, "example.com").await()
+val (driver, sender) = neton.http.h3.client.newClient(quic.asH3())
+launch { driver.run() }
+val stream = sender.sendRequest(Request.get("https://example.com/").body(Unit))
+stream.finish()
+val response = stream.recvResponse()
+while (true) stream.recvData() ?: break
+```
+
+A server certificate that does not chain to the client's trust anchors or does not match the server name fails the
+handshake, as does a peer without "h3". The KDoc of `neton.http.h3.quic.ALPN_H3` has the details.
 
 Complete programs: `http-bench/src/nativeMain/kotlin/neton/http/bench/` (`HelloServer.kt`, `EchoServer.kt`,
 `HelloClient.kt`).

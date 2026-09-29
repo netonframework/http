@@ -15,8 +15,9 @@ kotlin {
         commonMain.dependencies { api(project(":http")) }
         nativeMain.dependencies { api("com.netonstream:quic:0.1.0-SNAPSHOT") }
         commonTest.dependencies { implementation(kotlin("test")) }
-        // The TLS test double (MockTls) for the end-to-end tests over neton.quic (SPEC §5 layer 3). Test-only: no
-        // production source set may depend on quic-testkit.
+        // The TLS test double (MockTls) and the test PKI (TestPki) for the end-to-end tests over neton.quic, on the
+        // double and on the real TLS session (SPEC §5 layers 3 and 4). Test-only: no production source set may depend
+        // on quic-testkit.
         nativeTest.dependencies { implementation("com.netonstream:quic-testkit:0.1.0-SNAPSHOT") }
     }
 }

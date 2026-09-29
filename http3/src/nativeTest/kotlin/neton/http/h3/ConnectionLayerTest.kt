@@ -746,3 +746,8 @@ class ConnectionLayerTestMemory : ConnectionLayerTest() {
 class ConnectionLayerTestQuic : ConnectionLayerTest() {
     override val quic = NETON_QUIC
 }
+
+/** [ConnectionLayerTest] on neton.quic over loopback UDP with the real TLS 1.3 session. */
+class ConnectionLayerTestQuicTls : ConnectionLayerTest() {
+    override val quic = NETON_QUIC_TLS
+}

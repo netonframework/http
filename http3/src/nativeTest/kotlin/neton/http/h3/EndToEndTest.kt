@@ -8,7 +8,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import neton.http.Request
 import neton.http.StatusCode
-import neton.http.h3.quic.ALPN_H3
 import neton.http.h3.quic.ConnectionErrorIncoming
 import neton.io.bytes.Bytes
 import neton.io.net.SocketAddress
@@ -21,8 +20,6 @@ import neton.quic.proto.ServerConfig
 import neton.quic.proto.VarInt
 import neton.quic.proto.default
 import neton.quic.proto.withCrypto
-import neton.quic.testkit.MockClientCrypto
-import neton.quic.testkit.MockServerCrypto
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -39,10 +36,11 @@ import neton.http.h3.server.RequestStream as ServerRequestStream
 import neton.http.h3.server.builder as serverBuilder
 import neton.http.h3.server.newConnection
 
-// SPEC §5 layer 3: an HTTP/3 client and server of this library over two neton.quic endpoints on loopback UDP. The
-// QUIC handshake runs with the TLS test double of quic-testkit (both sides offer ALPN "h3"); there is no real TLS
-// yet, so none of this is interop evidence (phase D). The connection-layer scenarios of phase B also run over
-// neton.quic: ConnectionTestQuic, RequestTestQuic, ConnectionLayerTestQuic.
+// SPEC §5 layers 3 and 4: an HTTP/3 client and server of this library over two neton.quic endpoints on loopback UDP,
+// on the real TLS 1.3 session (EndToEndTestTls: test CA, server certificate for localhost, ALPN "h3") and on the TLS
+// test double of quic-testkit (EndToEndTestMock). Both ends are this library, so none of this is interop evidence
+// (SPEC §11, phase D). The connection-layer scenarios of phase B also run over neton.quic on both TLS layers:
+// ConnectionTestQuic / …QuicTls, RequestTestQuic / …QuicTls, ConnectionLayerTestQuic / …QuicTls.
 
 /** Deterministic body bytes: the byte at stream offset `i` is a function of `i`, so any slice can be checked. */
 private fun patternByte(offset: Long): Byte = ((offset * 31 + 7) % 251).toByte()
@@ -68,10 +66,11 @@ private class H3Pair(
 )
 
 private suspend fun CoroutineScope.h3Pair(
+    tls: TestTls,
     streamWindow: Int? = null,
     server: neton.http.h3.server.Builder = serverBuilder(),
 ): H3Pair {
-    val loop = quicLoopback { if (streamWindow != null) streamReceiveWindow(VarInt(streamWindow.toLong())) }
+    val loop = quicLoopback(tls) { if (streamWindow != null) streamReceiveWindow(VarInt(streamWindow.toLong())) }
     val s = server.build(loop.server)
     val serverDrive = async { s.run() }
     val (c, send) = newClient(loop.client)
@@ -97,7 +96,15 @@ private fun CoroutineScope.serve(
     }
 }
 
-class EndToEndTest {
+abstract class EndToEndTest {
+    /** The TLS layer under QUIC. */
+    abstract val tls: TestTls
+
+    private suspend fun CoroutineScope.h3Pair(
+        streamWindow: Int? = null,
+        server: neton.http.h3.server.Builder = serverBuilder(),
+    ): H3Pair = h3Pair(tls, streamWindow, server)
+
     @Test
     fun simple_get() = h3Test {
         val h = h3Pair()
@@ -433,11 +440,11 @@ class EndToEndTest {
     fun alpn_mismatch_fails_the_handshake() = h3Test {
         val serverEndpoint = Endpoint.create(
             EndpointConfig.default(),
-            ServerConfig.withCrypto(MockServerCrypto(alpn = listOf(ALPN_H3))),
+            ServerConfig.withCrypto(serverCrypto(tls)),
             bindUdp(SocketAddress.IPV4_LOCALHOST_ANY_PORT),
         )
         val clientEndpoint = Endpoint.create(EndpointConfig.default(), null, bindUdp(SocketAddress.IPV4_LOCALHOST_ANY_PORT))
-        val h2Only = ClientConfig(MockClientCrypto(alpn = listOf("h2".encodeToByteArray())))
+        val h2Only = ClientConfig(clientCrypto(tls, listOf("h2".encodeToByteArray())))
         val client = async { runCatching { clientEndpoint.connectWith(h2Only, serverEndpoint.localAddr(), "localhost").await() } }
         val server = runCatching { checkNotNull(serverEndpoint.accept()).await() }
         assertTrue(client.await().isFailure, "client handshake must fail")
@@ -447,4 +454,39 @@ class EndToEndTest {
             e.close()
         }
     }
+}
+
+/** [EndToEndTest] on the real TLS 1.3 session. */
+class EndToEndTestTls : EndToEndTest() {
+    override val tls = TestTls.REAL
+
+    /**
+     * A client whose only trust anchor is another CA rejects the server's certificate (TLS alert unknown_ca, QUIC
+     * CRYPTO_ERROR 0x130); HTTP/3 never starts. The trust anchors are explicit: there is no system trust store.
+     */
+    @Test
+    fun untrusted_server_certificate_fails_the_handshake() = h3Test {
+        val serverEndpoint = Endpoint.create(
+            EndpointConfig.default(),
+            ServerConfig.withCrypto(serverCrypto(tls)),
+            bindUdp(SocketAddress.IPV4_LOCALHOST_ANY_PORT),
+        )
+        val clientEndpoint = Endpoint.create(EndpointConfig.default(), null, bindUdp(SocketAddress.IPV4_LOCALHOST_ANY_PORT))
+        val otherCa = neton.quic.testkit.TestCa.create("unrelated CA")
+        val distrustful = ClientConfig(neton.quic.proto.TlsClientConfig(otherCa.trustAnchors, listOf(neton.http.h3.quic.ALPN_H3)))
+        val client = async { runCatching { clientEndpoint.connectWith(distrustful, serverEndpoint.localAddr(), "localhost").await() } }
+        val server = runCatching { checkNotNull(serverEndpoint.accept()).await() }
+        val err = assertIs<QuicConnectionError.Transport>(client.await().exceptionOrNull(), "client handshake must fail")
+        assertEquals(0x130L, err.error.code.value, "CRYPTO_ERROR(unknown_ca): ${err.error}")
+        assertTrue(server.isFailure, "server handshake must fail")
+        for (e in listOf(clientEndpoint, serverEndpoint)) {
+            e.close(VarInt(0), ByteArray(0))
+            e.close()
+        }
+    }
+}
+
+/** [EndToEndTest] on quic-testkit's TLS test double. */
+class EndToEndTestMock : EndToEndTest() {
+    override val tls = TestTls.MOCK
 }

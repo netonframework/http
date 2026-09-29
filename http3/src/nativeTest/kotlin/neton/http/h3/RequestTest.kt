@@ -614,3 +614,8 @@ class RequestTestMemory : RequestTest() {
 class RequestTestQuic : RequestTest() {
     override val quic = NETON_QUIC
 }
+
+/** [RequestTest] on neton.quic over loopback UDP with the real TLS 1.3 session. */
+class RequestTestQuicTls : RequestTest() {
+    override val quic = NETON_QUIC_TLS
+}

@@ -18,14 +18,41 @@ import neton.quic.SendStream as QuinnSendStream
 // one h3-quinn makes, call for call and error for error (SPEC §5, §11 "HTTP/3 阶段 C").
 //
 // ALPN. An HTTP/3 connection is a QUIC connection whose TLS handshake negotiated the protocol "h3" (RFC 9114 §3.1);
-// ALPN is part of the TLS configuration, not of QUIC's: the application sets [ALPN_H3] on the crypto configuration it
+// ALPN is part of the TLS configuration, not of QUIC's: the application sets [ALPN_H3] on the TLS configuration it
 // passes to neton.quic's `ServerConfig` / `ClientConfig` (as h3's examples set `alpn_protocols = vec![b"h3"]` on the
 // rustls configs they give quinn), and the handshake fails with no_application_protocol when the peers share none.
-// ⚠️ neton.quic has no real TLS yet: its handshake runs only with the test double of com.netonstream:quic-testkit
-// (`MockServerCrypto(alpn = listOf(ALPN_H3))`, `MockClientCrypto(alpn = ...)`), which production code must not use.
-// Until a real TLS session exists this adapter is exercised by tests only, and HTTP/3 over it is not accepted.
+// This adapter does not check ALPN itself (neither does h3-quinn). See [ALPN_H3] for building both configurations.
 
-/** The ALPN protocol ID of HTTP/3 (RFC 9114 §3.1), to set on the TLS configuration of both endpoints. */
+/**
+ * The ALPN protocol ID of HTTP/3 (RFC 9114 §3.1), to set on the TLS configuration of both endpoints.
+ *
+ * Building the QUIC configurations for HTTP/3 with neton.quic's TLS 1.3 session (`neton.quic.proto`):
+ *
+ * ```kotlin
+ * // Server: the certificate chain (leaf first, then intermediates) and its private key, both PEM or DER.
+ * val serverTls = TlsServerConfig(
+ *     certificateChain = Certificates.pem(chainPem),
+ *     privateKey = PrivateKey.pem(keyPem),
+ *     alpnProtocols = listOf(ALPN_H3),
+ * )
+ * val endpoint = Endpoint.create(EndpointConfig.default(), ServerConfig.withCrypto(serverTls), bindUdp(address))
+ * val conn = endpoint.accept()!!.await()
+ * val h3 = neton.http.h3.server.newConnection(conn.asH3())
+ *
+ * // Client: the trust anchors are explicit (the CA certificates that issued the server's chain, or a self-signed
+ * // server certificate); there is no system trust store. The server name passed to connect is checked against the
+ * // certificate's DNS names (or IP addresses, when it is one).
+ * val clientTls = TlsClientConfig(trustAnchors = Certificates.pem(caPem), alpnProtocols = listOf(ALPN_H3))
+ * val client = Endpoint.create(EndpointConfig.default(), null, bindUdp(localAddress))
+ * val quic = client.connectWith(ClientConfig(clientTls), serverAddress, "example.com").await()
+ * val (driver, sendRequest) = neton.http.h3.client.newClient(quic.asH3())
+ * ```
+ *
+ * A peer that offers no protocol in common fails the handshake with the TLS alert no_application_protocol; a server
+ * certificate that does not chain to the client's trust anchors, or does not match the server name, fails it with a
+ * certificate alert. `TlsClientConfig.dangerousNoServerVerificationForTestsOnly` exists for local tests only.
+ * Configurations are `AutoCloseable`; sessions already started keep what they need.
+ */
 val ALPN_H3: ByteArray get() = byteArrayOf('h'.code.toByte(), '3'.code.toByte())
 
 /** Wraps a neton.quic connection for HTTP/3 (`h3_quinn::Connection::new`). */
