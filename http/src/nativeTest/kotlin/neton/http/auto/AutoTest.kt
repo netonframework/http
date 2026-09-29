@@ -331,7 +331,7 @@ class AutoTest {
             config().serveConnectionWithUpgrades(server) { req ->
                 launch {
                     val up = upgradeOn(req.extensions)
-                    // hyper-util `auto::upgrade::downcast`: the original stream, not the detection wrapper.
+                    // The original stream (hyper-util needs `auto::upgrade::downcast` for this), the early bytes with it.
                     val (io, early) = up.downcast()
                     val acc = Buffer()
                     acc.writeBytes(early)

@@ -124,7 +124,10 @@ class Http2ServerConfig {
     fun autoDateHeader(enabled: Boolean) = apply { dateHeader = enabled }
 
     /** hyper `Builder::serve_connection`: the connection, to [Http2Connection.serve]. */
-    fun serveConnection(stream: IoStream, service: HttpService): Http2Connection {
+    fun serveConnection(stream: IoStream, service: HttpService): Http2Connection = serveConnection(stream, service, Bytes.EMPTY)
+
+    /** [serveConnection] with [replay] already read from [stream] (the auto server's protocol detection). */
+    internal fun serveConnection(stream: IoStream, service: HttpService, replay: Bytes): Http2Connection {
         val builder = neton.http.h2.server.Builder()
             .initialWindowSize(initialStreamWindowSize)
             .initialConnectionWindowSize(initialConnWindowSize)
@@ -143,7 +146,7 @@ class Http2ServerConfig {
             // A server with keep-alive always pings while idle, to close dead connections more aggressively.
             keepAliveWhileIdle = true,
         )
-        return Http2Connection(stream, service, builder, ping, dateHeader)
+        return Http2Connection(stream, service, builder, ping, dateHeader, replay)
     }
 
     private companion object {
@@ -184,6 +187,7 @@ class Http2Connection internal constructor(
     private val builder: neton.http.h2.server.Builder,
     private val pingConfig: PingConfig,
     private val dateHeader: Boolean,
+    private val replay: Bytes = Bytes.EMPTY,
 ) {
     private var conn: neton.http.h2.server.Connection? = null
     private var closePending = false
@@ -197,7 +201,7 @@ class Http2Connection internal constructor(
      */
     suspend fun serve() {
         val h2 = try {
-            builder.handshake(stream)
+            builder.handshake(stream, replay)
         } catch (e: H2Error) {
             throw newH2(e)
         }

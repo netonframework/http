@@ -128,6 +128,8 @@ class Http1Connection internal constructor(
     private val config: Http1ServerConfig,
     /** [Http1ServerConfig.upgrades], or the auto connection's choice (hyper-util calls `with_upgrades` or not). */
     private val upgrades: Boolean = config.upgrades,
+    /** Bytes already read from [stream] (the auto connection's protocol detection), read before the stream. */
+    replay: Bytes = Bytes.EMPTY,
 ) {
     private val io = H1Io(stream, config.maxBufSize)
     private val conn = H1Conn(io, isServer = true, config.h1Config())
@@ -159,6 +161,7 @@ class Http1Connection internal constructor(
         io.queueStrategy = config.writev ?: true
         io.flushPipeline = config.pipelineFlush
         conn.onBodyDone = { maybeStartWatch() }
+        if (replay.size > 0) io.readBuf.writeBytes(replay)
     }
 
     /**

@@ -1,7 +1,6 @@
 package neton.http.auto
 
 import neton.http.HttpError
-import neton.http.Upgraded
 import neton.http.h1.Http1Connection
 import neton.http.h1.Http1ServerConfig
 import neton.http.h1.HttpService
@@ -9,6 +8,7 @@ import neton.http.h2.Http2Connection
 import neton.http.h2.Http2ServerConfig
 import neton.http.h2.proto.PREFACE
 import neton.io.bytes.Buffer
+import neton.io.bytes.Bytes
 import neton.io.core.IoException
 import neton.io.core.IoStream
 import neton.io.core.StreamCapability
@@ -101,8 +101,9 @@ class AutoServerConfig(
     /**
      * Binds a connection to [service] with HTTP/1 upgrades (hyper-util `serve_connection_with_upgrades`): as
      * [serveConnection], but [http1Only] / [http2Only] are not used (as hyper-util). An HTTP/1 connection hands over
-     * after a `101` / CONNECT `2xx` response; [Upgraded.downcast] returns the original stream (hyper-util's
-     * `auto::upgrade::downcast`).
+     * after a `101` / CONNECT `2xx` response; its [neton.http.Upgraded.downcast] returns the original stream as usual
+     * (hyper-util needs `auto::upgrade::downcast` to see through its `Rewind`; there is no wrapper here, see
+     * [AutoConnection]).
      */
     fun serveConnectionWithUpgrades(stream: IoStream, alpnProtocol: String?, service: HttpService): AutoConnection =
         AutoConnection(stream, service, http1, http2, alpnVersion(alpnProtocol), upgrades = true)
@@ -127,8 +128,14 @@ class AutoServerConfig(
 /**
  * One HTTP/1 or HTTP/2 server connection (hyper-util `auto::Connection` / `UpgradeableConnection`). When the
  * protocol is not decided up front, [serve] first reads up to the 24 bytes of the HTTP/2 connection preface
- * (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`): all of them → HTTP/2; the first byte that differs, or an EOF, → HTTP/1. What
- * was read is replayed to the chosen protocol (hyper-util `Rewind`). This happens once per connection.
+ * (`PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`): all of them → HTTP/2; the first byte that differs, or an EOF, → HTTP/1. This
+ * happens once per connection.
+ *
+ * ⚖️ What was read is not replayed through a wrapper stream (hyper-util `Rewind`): it is placed in the chosen
+ * protocol's read buffer, as if that connection had read it. Same bytes, same order; but a wrapper stays on every
+ * read, write, flush and timeout call of the connection's life — measured on the HTTP/1 hello benchmark at about
+ * 150 instructions per request (SPEC §11). hyper-util cannot do this (hyper takes only an I/O object); here both
+ * protocols are in the same library.
  *
  * ⚖️ hyper-util puts no time limit on the detection; here it is bounded by [Http1ServerConfig.headerReadTimeoutMillis]
  * (the HTTP/1 limit for the first request, SPEC §3.9) from the start of [serve] — [HttpError.Kind.HeaderTimeout] —
@@ -162,10 +169,10 @@ class AutoConnection internal constructor(
     suspend fun serve() {
         h1?.let { it.serve(); return }
         h2?.let { it.serve(); return }
-        val (version, io) = readVersion()
+        val (version, replay) = readVersion()
         if (version == AutoServerConfig.H1) {
             val c = try {
-                Http1Connection(io, service, http1, upgrades)
+                Http1Connection(stream, service, http1, upgrades, replay)
             } catch (e: IllegalArgumentException) {
                 stream.close()                              // options that do not fit the stream
                 throw e
@@ -173,7 +180,7 @@ class AutoConnection internal constructor(
             h1 = c
             c.serve()
         } else {
-            val c = http2.serveConnection(io, service)
+            val c = http2.serveConnection(stream, service, replay)
             h2 = c
             c.serve()
         }
@@ -192,8 +199,8 @@ class AutoConnection internal constructor(
         if (detecting) stream.close()                       // wakes the parked read
     }
 
-    /** hyper-util `ReadVersion`: the protocol, and the stream with what was read put back in front. */
-    private suspend fun readVersion(): Pair<Int, IoStream> {
+    /** hyper-util `ReadVersion`: the protocol, and what was read. */
+    private suspend fun readVersion(): Pair<Int, Bytes> {
         if (cancelled) throw cancelledError()
         val timeout = http1.headerReadTimeoutMillis
         if (timeout > 0) {
@@ -230,7 +237,7 @@ class AutoConnection internal constructor(
             detecting = false
         }
         if (cancelled) throw cancelledError()
-        return version to Upgraded(stream, buf.readSlice(buf.readableBytes), rewind = true)
+        return version to buf.readSlice(buf.readableBytes)
     }
 
     /** Whether the bytes read after the first [from] still match the preface (only its 24 bytes are compared). */

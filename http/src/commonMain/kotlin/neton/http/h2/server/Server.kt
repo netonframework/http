@@ -31,6 +31,7 @@ import neton.http.h2.proto.ProtoError
 import neton.http.h2.proto.StreamRef
 import neton.http.h2.proto.copySettings
 import neton.io.bytes.Buffer
+import neton.io.bytes.Bytes
 import neton.io.core.IoException
 import neton.io.core.IoStream
 import kotlin.time.Duration
@@ -278,7 +279,10 @@ class Builder {
      * Sends the server SETTINGS and reads the client preface over [io] (`handshake`).
      * @throws H2Error an I/O error, an EOF before the preface, or a GOAWAY PROTOCOL_ERROR for an invalid preface.
      */
-    suspend fun handshake(io: IoStream): Connection {
+    suspend fun handshake(io: IoStream): Connection = handshake(io, Bytes.EMPTY)
+
+    /** [handshake] with [replay] already read from [io] (the auto server's protocol detection): read before [io]. */
+    internal suspend fun handshake(io: IoStream, replay: Bytes): Connection {
         val local = copySettings(settings)
         val codec = Codec()
         local.maxFrameSize?.let { codec.setMaxRecvFrameSize(it.toInt()) }
@@ -286,6 +290,7 @@ class Builder {
         check(codec.buffer(local) == null)
 
         val readBuf = Buffer(READ_BUFFER_SIZE, pooled = true)
+        if (replay.size > 0) readBuf.writeBytes(replay)
         try {
             // Flush the SETTINGS, then read the preface.
             val fw = codec.writer
