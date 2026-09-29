@@ -1134,4 +1134,12 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   都未覆盖丢包与乱序下的 HTTP/3 行为（回环不丢包）；其余同阶段 B 的未决项。
 - 阶段 C 报告的 quic 写入不让出问题已在 quic 修复（quic SPEC §11.8 补记，提交 d9b8186：连续 32 次未挂起的写入后让出一次）。
   `oversizedResponseHeadersFrameFailsOnClient` 在真实 QUIC 上由 macOS 3–7 s（153 上 9–17 s）降到约 1 s；http3 369 个测试全过。
+- HTTP/3 评审修复（2026-09-29，详见仓库根目录 `REVIEW-2026-09-29.md`）：
+  - 控制流首帧在通用解码器跳过未知帧之前按线上类型检查，非 SETTINGS 立即 H3_MISSING_SETTINGS（RFC 9114 §6.2.1）；此前未知帧被跳过，
+    首帧不是 SETTINGS 也能通过。
+  - QPACK：Required Insert Count 为 0 时符号位为 1 即 Base 为负，判 QPACK_DECOMPRESSION_FAILED（RFC 9204 §4.5.1.2）；原先明确接受负 Base
+    的测试改为测正 Base。
+  - `recvTrailers()` 丢弃正文时同样按 content-length 检查超出，立即报流错误，不再等对端结束。
+  - 客户端 `sendRequest` 在返回句柄前负责已打开的流：失败或取消时复位发送半边、停止接收半边；`openBi` 挂起后再次检查 GOAWAY 与发送器关闭。
+  - 新增测试先在旧实现上确认失败。macOS：http3 378、http 1197（14 忽略）；153 两种驱动：http3 378、http 1198（14 忽略）全过。
 

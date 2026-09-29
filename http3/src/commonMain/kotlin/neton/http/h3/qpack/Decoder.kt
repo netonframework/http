@@ -76,6 +76,8 @@ class Decoder(
         val encodedInsertCount = r.value
         intOrFail(r, 7)
         if (encodedInsertCount != 0L) fail(DecoderError.MissingRefs(encodedInsertCount))
+        // With Required Insert Count zero, a negative Delta Base always produces a negative Base.
+        if (r.flags != 0) fail(DecoderError.InvalidBase)
 
         while (r.remaining > 0) {
             if (fieldCount >= maxFieldCount) fail(DecoderError.TooManyFields(fieldCount + 1))
@@ -175,6 +177,7 @@ private fun fail(error: DecoderError): Nothing = throw DecoderException(error)
  * for when it resets the stream instead.
  */
 sealed class DecoderError(val code: Code) {
+    data object InvalidBase : DecoderError(Code.QPACK_DECOMPRESSION_FAILED)
     data class InvalidInteger(val error: PrefixIntError) : DecoderError(Code.QPACK_DECOMPRESSION_FAILED)
     data class InvalidString(val error: PrefixStringError) : DecoderError(Code.QPACK_DECOMPRESSION_FAILED)
     data class InvalidStaticIndex(val index: Long) : DecoderError(Code.QPACK_DECOMPRESSION_FAILED)

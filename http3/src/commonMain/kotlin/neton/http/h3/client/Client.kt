@@ -182,8 +182,8 @@ class SendRequest internal constructor(
      * Opens a request stream and sends [request]'s head (`send_request`); the body goes through the returned stream,
      * which [RequestStream.finish] ends.
      * @throws StreamError [StreamError.RemoteClosing] after a GOAWAY; [StreamError.HeaderTooBig] beyond the server's
-     * SETTINGS_MAX_FIELD_SECTION_SIZE (the stream was already opened; it is ended empty, as the reference's dropped
-     * stream is); [StreamError.Connection] when the connection is closed.
+     * SETTINGS_MAX_FIELD_SECTION_SIZE; [StreamError.Connection] when the connection is closed.
+     * Until a handle is returned, any failure or cancellation abandons both halves of the opened stream.
      */
     suspend fun sendRequest(request: Request<*>): RequestStream {
         check(!closed) { "SendRequest used after close()" }
@@ -201,24 +201,40 @@ class SendRequest internal constructor(
         } catch (e: StreamErrorIncoming) {
             throw shared.streamError(e)
         }
-        val inner = RequestStreamInner(stream, stream, shared, config, sendGreaseFrame)
-        val block = try {
-            inner.encode(header)
-        } catch (e: StreamError.HeaderTooBig) {
-            try {
-                stream.finish()
-            } catch (_: StreamErrorIncoming) {
-            }
-            throw e
-        }
+        var handedOff = false
+        var sendFinished = false
         try {
+            // openBi may suspend while the control-stream driver receives GOAWAY.
+            if (shared.closing) throw StreamError.RemoteClosing()
+            check(!closed) { "SendRequest closed while opening stream" }
+            val inner = RequestStreamInner(stream, stream, shared, config, sendGreaseFrame)
+            val block = try {
+                inner.encode(header)
+            } catch (e: StreamError.HeaderTooBig) {
+                // Preserve the empty FIN seen by peers for a locally rejected header section.
+                try {
+                    stream.finish()
+                    sendFinished = true
+                } catch (_: StreamErrorIncoming) {
+                }
+                throw e
+            }
             stream.writeBuf(WriteBuf.of(Frame.Headers(block)))
+            val result = RequestStream(inner, request.method)
+            sendGreaseFrame = false
+            handedOff = true
+            return result
         } catch (e: StreamErrorIncoming) {
             throw shared.streamError(e)
+        } finally {
+            if (!handedOff) {
+                try {
+                    if (!sendFinished) stream.reset(Code.H3_REQUEST_CANCELLED.value)
+                } finally {
+                    stream.stopSending(Code.H3_REQUEST_CANCELLED.value)
+                }
+            }
         }
-        // Send the GREASE frame only once.
-        sendGreaseFrame = false
-        return RequestStream(inner, request.method)
     }
 
     /** Another sender for the same connection (`Clone`). */

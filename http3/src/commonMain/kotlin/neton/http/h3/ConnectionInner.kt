@@ -237,6 +237,14 @@ internal class ConnectionInner private constructor(
         val frames = FrameStream(config.maxHeadersFrameSize)
         frames.buffer.writeBytes(leftover.backingArray(), leftover.readerIndex(), leftover.readableBytes)
         while (true) {
+            // Check the wire type before the generic decoder can discard an unknown frame.
+            if (!gotPeerSettings) {
+                val buf = frames.buffer
+                val type = neton.http.h3.proto.VarInt.decode(buf.backingArray(), buf.readerIndex(), buf.writerIndex())
+                if (type >= 0 && type != neton.http.h3.proto.FrameType.SETTINGS) {
+                    return fail(Code.H3_MISSING_SETTINGS, "received frame type $type before settings")
+                }
+            }
             val frame = try {
                 frames.nextFrame()
             } catch (e: FrameException) {

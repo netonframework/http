@@ -28,6 +28,18 @@ private class Collect : FieldSink {
 // the dynamic-table ones are not applicable (see SPEC §11), and the encoder / decoder stream ones are in
 // QpackStreamsTest. Then the ⚖️ behaviours: dynamic references and the incremental limits.
 class CodecTest {
+    @Test
+    fun negativeBaseIsRejectedEvenWithoutDynamicReferences() {
+        for (prefix in listOf("00 80", "00 81", "00 ff 00")) {
+            val error = assertFailsWith<DecoderException> {
+                Decoder().decode(hex(prefix), 0, hex(prefix).size, Collect())
+            }
+            assertEquals(Code.QPACK_DECOMPRESSION_FAILED, error.error.code)
+        }
+        // Positive Base is legal without dynamic references.
+        Decoder().decode(hex("00 01"), 0, 2, Collect())
+    }
+
     // ---- encoder.rs ----
 
     @Test
@@ -145,11 +157,11 @@ class CodecTest {
     }
 
     @Test
-    fun anyDeltaBaseIsAcceptedWithARequiredInsertCountOfZero() {
-        // RFC 9204 §4.5.1.2: a section without dynamic references may use any Base.
+    fun positiveDeltaBaseIsAcceptedWithARequiredInsertCountOfZero() {
+        // RFC 9204 section 4.5.1.2 allows any nonnegative Base, not a negative Base.
         val block = Buffer()
         PrefixInt.encode(8, 0, 0, block)
-        PrefixInt.encode(7, 1, 1234, block)
+        PrefixInt.encode(7, 0, 1234, block)
         Indexed.Static(17).encode(block)
         assertEquals(listOf(HeaderField(":method", "GET")), Decoder.decodeStateless(block, Long.MAX_VALUE).fields)
     }

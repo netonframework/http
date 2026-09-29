@@ -69,6 +69,22 @@ abstract class ConnectionLayerTest {
 
     // ---- critical streams (RFC 9114 §6.2.1, RFC 9204 §4.2): closed or reset → H3_CLOSED_CRITICAL_STREAM ----
 
+    @Test
+    fun unknownFrameBeforeSettingsIsRejectedWithoutWaitingForPayload() = h3Test {
+        serverFailsAfter(Code.H3_MISSING_SETTINGS) { cq ->
+            cq.openUni().send(Buffer().varint(StreamType.CONTROL).varint(0x21).varint(1024))
+        }
+    }
+
+    @Test
+    fun unknownFrameCannotHideBeforeSettings() = h3Test {
+        serverFailsAfter(Code.H3_MISSING_SETTINGS) { cq ->
+            val control = cq.openUni()
+            control.send(Buffer().varint(StreamType.CONTROL).varint(0x21).varint(0))
+            control.send(Buffer().varint(4).varint(0))
+        }
+    }
+
     private suspend fun CoroutineScope.serverFailsAfter(code: Code, rawClient: suspend (neton.http.h3.quic.Connection) -> Unit) {
         val (cq, sq) = quicPair()
         rawClient(cq)
@@ -661,6 +677,21 @@ abstract class ConnectionLayerTest {
         val (_, s) = getStreamBlocking(incoming)!!
         assertNull(s.recvData())
         assertEquals(Code.H3_MESSAGE_ERROR, failsWith<StreamError.Stream> { s.recvTrailers() }.code)
+    }
+
+    @Test
+    fun discardingBodyRejectsExcessBeforePeerFinishes() = h3Test {
+        val (cq, sq) = quicPair()
+        val incoming = newConnection(sq)
+        launch { incoming.run() }
+        val (driver, send) = newClient(cq)
+        launch { driver.run() }
+        val stream = send.sendRequest(Request.post("http://localhost/").header("content-length", "2").body(Unit))
+        stream.sendData(bytes("too long"))
+        // Deliberately leave the stream open: rejection must not wait for FIN or trailers.
+        val (_, s) = getStreamBlocking(incoming)!!
+        assertEquals(Code.H3_MESSAGE_ERROR, failsWith<StreamError.Stream> { s.recvTrailers() }.code)
+        assertNull(incoming.error)
     }
 
     @Test

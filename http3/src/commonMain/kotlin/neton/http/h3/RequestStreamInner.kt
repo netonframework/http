@@ -143,10 +143,14 @@ internal class RequestStreamInner(
             }
         }
         val data = nextData()
-        received += data.size
+        accountData(data.size)
+        return data
+    }
+
+    private fun accountData(size: Int) {
+        received += size
         val cl = contentLength
         if (cl != null && received.toULong() > cl) throw malformed("more DATA than the content-length $cl")
-        return data
     }
 
     /**
@@ -174,7 +178,7 @@ internal class RequestStreamInner(
     private suspend fun skipBodyToTrailers(): Bytes? {
         if (bodyDone) return null
         while (true) {
-            while (frames.hasData) received += nextData().size
+            while (frames.hasData) accountData(nextData().size)
             val frame = try {
                 nextFrame()
             } catch (e: FrameException) {
