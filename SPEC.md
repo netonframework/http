@@ -13,6 +13,7 @@
   - `hyper` 1.11.1（HTTP/1.1 与 HTTP/2 引擎，记作 `Y/…`）。
   - `h2` 0.4.19（HTTP/2，记作 `H2/…`）。
   - `h3` 0.0.8（HTTP/3，记作 `H3/…`）。
+  - `hyper-util` 0.1.20，只取 `server::conn::auto`（同一端口上的 HTTP/1 与 HTTP/2，记作 `U/…`；2026-09-29 纳入，§4.5）。
   - 自有性能参考：`~/projects/Neton/geario-http`。
 - **能力盘点**：2026-09-27 逐项阅读源码所得。
 - **标注**：
@@ -25,13 +26,13 @@
 - **不在本库**：
   - TLS：由 `IoStream` 包装的独立模块提供。
   - 压缩（content-encoding）。
-  - 客户端连接池与"自动识别 h1 / h2"的服务端：hyper-util 的能力，不在本轮参考范围，见 §7 待决。
+  - 客户端连接池等 hyper-util 的其余能力，见 §7 待决。"自动识别 h1 / h2"的服务端（`server::conn::auto`）已纳入（§4.5）。
 
 ## 1. 产物与分层
 
 | 产物 | 坐标 | 包 | 依赖 |
 |---|---|---|---|
-| 通用类型 + HTTP/1.1 + HTTP/2 | `com.netonstream:http` | `neton.http`（通用）、`neton.http.h1`、`neton.http.h2` | `com.netonstream:io` |
+| 通用类型 + HTTP/1.1 + HTTP/2 | `com.netonstream:http` | `neton.http`（通用）、`neton.http.h1`、`neton.http.h2`、`neton.http.auto` | `com.netonstream:io` |
 | HTTP/3（独立仓库 `http3`，2026-09-29） | `com.netonstream:http3` | `neton.http.h3` | `com.netonstream:http`、`com.netonstream:quic` |
 
 - **为何拆成两个产物、两个仓库**：只用 HTTP/1.1 或 HTTP/2 的使用者不必带上 QUIC 与 OpenSSL；HTTP/3 随 quic 演进，发版节奏不同。2026-09-29 起
@@ -43,6 +44,7 @@ neton.http        通用模型：Request / Response / HeaderMap / HeaderName / H
                   Body（数据帧与 trailer 帧）；HttpService；错误类型
 neton.http.h1     HTTP/1.1：头部解析器（复刻 httparse）+ 连接状态机与编解码（复刻 hyper proto/h1）+ 服务端 / 客户端连接
 neton.http.h2     HTTP/2：帧、HPACK、流与连接状态机、流量控制（复刻 h2）+ hyper 的 h2 接线（默认值、BDP、keep-alive ping、CONNECT）
+neton.http.auto   同一连接上的 HTTP/1 或 HTTP/2（复刻 hyper-util server::conn::auto）：按连接前言或 ALPN 选择，再交给 h1 / h2
           ↓
 com.netonstream:io（IoStream / Framed / Buffer / Bytes / 反应器 / 准入 / 计时）
 （neton.http.h3 在独立仓库 http3，另依赖 com.netonstream:quic）
@@ -415,6 +417,39 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   - 本库：连接与它的所有流都在所属反应器上，不加锁。
   - 用户句柄在其他线程上使用时，经反应器投递（neton-io §28.3）。
 
+### 4.5 同端口 HTTP/1 与 HTTP/2（复刻 hyper-util 0.1.20 `server::conn::auto`，2026-09-29）
+
+Neton 框架的默认引擎 hyper4k 用 hyper-util 的 `auto::Builder` 在一个端口上同时服务 HTTP/1 与 HTTP/2；本库上的引擎适配器需要同样的能力。
+包 `neton.http.auto`（与 `h1` / `h2` 并列：它不是新协议，只是在连接开头选定协议后交给二者之一）。
+
+| 参考（`U/src/server/conn/auto/mod.rs`） | 本库 | |
+|---|---|---|
+| `Builder`：`http1()` / `http2()` 子构建器 | `AutoServerConfig(http1, http2)`；`http1 { copy(...) }`（`Http1ServerConfig` 不可变，新增 `copy`）、`http2 { ... }`（原地修改） | ✅ |
+| `http1_only` / `http2_only`（二者至多其一，否则断言失败）、`is_http1_available` / `is_http2_available` | 同名；第二次设置抛 `IllegalStateException` | ✅ |
+| `title_case_headers` / `preserve_header_case` 顶层快捷方式 | 同名，只改 HTTP/1 | ✅ |
+| `serve_connection`：`*_only` 时直接绑定该协议（不读），否则 `ReadVersion` | `serveConnection(stream, service)` → `AutoConnection` | ✅ |
+| `serve_connection_with_upgrades`：总是 `ReadVersion`，`*_only` 不起作用（参考文档明言） | `serveConnectionWithUpgrades`，同样忽略 `*_only`；HTTP/1 以 `upgrades = true` 服务，`serveConnection` 以 `false`（与 `Http1ServerConfig.upgrades` 无关，照参考是否调用 `with_upgrades`） | ✅ |
+| `ReadVersion`：至多读 24 字节前言 `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`，初始为 H2；每次读后只比较新到的字节，第一个不同的字节或 EOF（本次读 0 字节）→ H1；读满 24 字节全部相同 → H2 | 同；一次读到多于 24 字节时只比较前 24 字节，其余一并交给所选协议 | ✅ |
+| 读到的字节经 `Rewind` 回放给所选协议 | 放入所选协议连接的读缓冲（HTTP/1 的 `H1Io.readBuf`、HTTP/2 握手的读缓冲），等同于该连接自己读到 | ⚖️ 见下 |
+| `graceful_shutdown`：检测中 → 取消检测，future 以 `io::ErrorKind::Interrupted`（"Cancelled"）结束；已选定 → 转给 h1 / h2 连接 | 同；检测中的读被关闭流唤醒，`serve` 抛 `HttpError(Io)`，原因为 errno EINTR 的 `IoException("Cancelled")`；选定的协议在 `serveConnection` 时即绑定（参考亦然），故 `serve` 之前的停机也转给它 | ✅ |
+| `upgrade::downcast`（因 `Rewind` 是私有类型而存在的变通） | 不需要：没有包装流，`Upgraded.downcast` 直接返回原始流与未消费的字节 | ⛔ |
+| `into_owned`、执行器、`Timer`、`HttpServerConnExec` | Rust 生命周期与运行时抽象（§1 的映射） | ⛔ |
+
+- **⚖️ 不用包装流回放**：先按参考用 `Rewind` 式包装（复用 `Upgraded`）实现并在 153 上测量（§11）：包装留在连接整个生命期的每次读、写、
+  flush 与设置读超时上，HTTP/1 hello 每请求多约 150 Ir（`Upgraded.read` 55、`setReadTimeout` 40、`write` 27、`flush` 23，另有帧清零），
+  分配数不变。参考做不到直接交给读缓冲（hyper 只接受 I/O 对象），本库两个协议在同一库内，于是改为交给读缓冲：字节与顺序相同，每请求零成本。
+- **⚖️ ALPN**：参考没有 ALPN 输入——它总是读前言，TLS 上也能工作（h2 客户端照样先发前言）。本库的 TLS 在 `tls` 库终止，其 `TlsStream.alpn`
+  给出协商结果；已知结果时协议已定，不必再读。`serveConnection(stream, alpnProtocol, service)` /
+  `serveConnectionWithUpgrades(stream, alpnProtocol, service)`：`"h2"` → HTTP/2，`"http/1.1"` / `"http/1.0"` → HTTP/1，都不先读；null 或其他值
+  → 照参考检测。`http1Only` / `http2Only` 优先于 ALPN（参考从不看 ALPN，只看这两项）。协商了 `http/1.1` 却发送前言的对端得到 HTTP/1 的
+  `VersionH2` 错误，与 hyper 的 HTTP/1 连接相同。
+- **⚖️ 检测超时**：参考的 `ReadVersion` 没有时限（hyper 的头部读取计时器在 HTTP/1 连接开始后才启动），一个只发前言前几个字节的客户端可以
+  一直占着连接。本库以 HTTP/1 的 `headerReadTimeoutMillis`（首个请求的时限，§3.9，默认 10 s）限制检测，自 `serve` 起计；超时 →
+  `HttpError(HeaderTimeout)` 并关闭。之后 HTTP/1 照常从头计自己的时限（最坏合计约 2 倍）；选定 HTTP/2 时把读超时恢复为 0。非零值需要
+  `ReadTimeout` 能力，与 HTTP/1 相同（内存流需把它设为 0）。只有检测时生效：`*_only` 与 ALPN 直接选定时不读，也不计时。
+- **错误**：检测阶段的 I/O 错误 → `HttpError(Io)`；选定后为该协议连接自己的错误（参考为装箱的错误）。连接结束时流被关闭（升级除外），同 h1 / h2。
+- **性能**：检测每连接一次（一个 24 字节的缓冲与一个切片）；每请求路径与直接使用 h1 / h2 相同（§11 实测）。
+
 ## 5. HTTP/3
 
 HTTP/3（复刻 `h3` 0.0.8，在 `com.netonstream:quic` 上）于 2026-09-29 独立为 `http3` 仓库（netonframework/http3，产物
@@ -432,6 +467,7 @@ HTTP/3（复刻 `h3` 0.0.8，在 `com.netonstream:quic` 上）于 2026-09-29 独
 | hyper `tests/integration.rs` 与回归测试 | 14 + 4 | 客户端与服务端往返；flush、缓冲中停机、就绪、无缓冲流 |
 | hyper 模块内测试 | 约 110 | role 27、decode 17、conn 11、encode 10、io 11 等 |
 | h2 `tests/h2-tests` | 229 | client_request 45、flow_control 52、server 43、stream_states 36、codec_read 14、push_promise 10、prioritization 7、informational 7、ping_pong 5、trailers 5、codec_write 4、hammer 1 |
+| hyper-util `server/conn/auto` 模块内测试 | 10 | 构建器配置（含 `title_case_headers` / `preserve_header_case`）、http1 / http2、`*_only` 及其拒绝另一协议、检测中的优雅停机 |
 | h2 模块内测试与 HPACK 一致性 | 约 59 + fixtures | `fixtures/hpack/` 中各实现的 JSON 用例（go、haskell、nghttp2、node、python 等） |
 | 模糊测试 | httparse 6、http 1、h2 3（客户端、端到端、HPACK） | 语料按参考 |
 | 外部一致性 | h2spec v2.1.1 | 纳入验收；不继承参考的跳过项（h3spec 见 `http3` 仓库） |
@@ -446,7 +482,9 @@ HTTP/3（复刻 `h3` 0.0.8，在 `com.netonstream:quic` 上）于 2026-09-29 独
 
 ## 7. 待决
 
-- hyper-util 的能力（客户端连接池、h1 / h2 自动识别的服务端、`TokioExecutor` 等）不在本轮参考中。若需要，另外固定 hyper-util 的版本并加入对等清单。
+- hyper-util：2026-09-29 固定 0.1.20，只纳入 `server::conn::auto`（§4.5，Neton 引擎适配器需要同端口的 HTTP/1 与 HTTP/2）。其余能力——
+  客户端连接池与 legacy client、`server::graceful`（停机由 neton-io 的组停机承担，neton-io §27）、`TokioExecutor` / `TokioIo` 等运行时适配、
+  `service` 工具——仍不在范围；需要时再逐项加入对等清单。
 - `http3` 单列坐标与独立仓库：已定（§1，2026-09-29）。
 
 ## 8. 性能对照
@@ -756,3 +794,26 @@ HTTP/3（复刻 `h3` 0.0.8，在 `com.netonstream:quic` 上）于 2026-09-29 独
   - `Buffer.writeBytes` 对 ≤ 16 字节用重叠的字搬运代替 `memmove`（neton-io 实验）：虚拟机与 153 都无收益（153 上 hello 略差），已弃用。
 
 - HTTP/3 的全部实施记录（阶段 A–D、评审修复、GREASE 调整）已随 `http3` 仓库迁出（2026-09-29），见 netonframework/http3 的 SPEC §4。
+
+**同端口 HTTP/1 与 HTTP/2：hyper-util `server::conn::auto`（2026-09-29，§4.5）**
+- 为 Neton 引擎适配器复刻 hyper-util 0.1.20 的 `server::conn::auto`，包 `neton.http.auto`：`AutoServerConfig`（HTTP/1 与 HTTP/2 两份配置、
+  `http1Only` / `http2Only`、`isHttp1Available` / `isHttp2Available`、`titleCaseHeaders` / `preserveHeaderCase`）、`serveConnection` /
+  `serveConnectionWithUpgrades`（各有带 ALPN 结果的重载）、`AutoConnection`（`serve`、`gracefulShutdown`）。为此：`Http1ServerConfig.copy`
+  （公开，参考构建器的 setter）；`Http1Connection` 与 h2 服务端握手各多一个内部入参（是否升级、检测已读的字节）。
+- 测试（`AutoTest`，31 个）：hyper-util 的 10 个全部移植；另加 21 个：前言逐字节到达仍为 HTTP/2；与前言共享前 11 字节的 HTTP/1 请求
+  （`PRI * HTTP/1.1`，逐字节）；只差最后一个字节的前言走 HTTP/1（hyper 对不完整前言报 `Version` 并回 400，不是 `VersionH2`，测试按此断言）；
+  前言与其后的帧、长于 24 字节的 HTTP/1 请求同一次到达时全部交给所选协议；立即 EOF 的空连接干净结束；前言片段后 EOF 为
+  `IncompleteMessage`；h2c 同连接 5 路并发带请求体；经 auto 的 HTTP/1 保活；经 auto 的升级（头部与新协议的首批字节同一次写入，
+  `downcast` 得到原始流与这些字节）；不带升级时为 `UserManualUpgrade`；`*_only` 在带升级时不起作用；HTTP/1 进行中 / 空闲、HTTP/2 进行中的
+  优雅停机；检测到一半时停机；已选定协议时 `serve` 之前的停机；ALPN 三组（`h2` 不先读就发出 SETTINGS、`http/1.1` 收到前言得 `VersionH2`、
+  带升级 / `*_only` 优先 / 未知名字回到检测）；检测超时与选定 HTTP/2 后读超时被撤销（这两个只在 TCP 下有意义，内存流下断言超时配置被拒绝）。
+  macOS 内存 / TCP 两种模式各 1,228 个（原 1,197 + 31），14 个忽略，0 失败；连续三轮只跑 auto 也无抖动。153（Rocky 9.8）上内存 / TCP × epoll /
+  io_uring 四种组合各 1,229 个（原 1,198 + 31），14 个忽略，0 失败（在检测超时配置被拒时关闭流的小修正之前的提交上运行）。
+- 性能（153，cachegrind，`cg-http.sh` 的副本指向本工作区的 helloServer，10 个保活连接，epoll，`NETON_HTTP_AUTO=1` 与直接 HTTP/1 交替各 3 轮）：
+  - 第一版按参考用包装流回放（复用 `Upgraded` 作 `Rewind`，其 `downcast` 看穿包装）：直接 11,209 / 11,164 / 11,135，auto 11,306 / 11,352 /
+    11,319 Ir/请求，多约 **157**（噪声约 ±25）。逐函数差分：`Upgraded.read` 55、`setReadTimeout` 40、`write` 27、`flush` 23，其余是帧清零；
+    分配数不变（`CustomAllocator::Allocate` 495.3 对 495.5 Ir/请求）。包装在连接整个生命期的每次调用上都要转发一次。
+  - 改为把检测读到的字节交给所选协议的读缓冲（⚖️，§4.5）：直接 11,261 / 11,203 / 11,215，auto 11,190 / 11,200 / 11,209，**无差别**；
+    逐函数差分中不再有 auto 或包装的函数。`Upgraded` 恢复原样。
+  - HTTP/2 经 auto 与直接相比只多握手前的一次检测（每连接），未单独测量。
+- 未做：真实 TLS 上的 ALPN 端到端（本库不依赖 `tls`，测试以字符串代替 `TlsStream.alpn`，由引擎适配器接入时验证）。

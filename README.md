@@ -2,9 +2,9 @@
 
 HTTP for Kotlin/Native on top of `com.netonstream:io`. The first version replicates the capabilities of pinned Rust
 references: `http` 1.5.0 (common types), `httparse` 1.10.1 and hyper 1.11.1 (HTTP/1.1), `h2` 0.4.19 and hyper's
-HTTP/2 wiring. HTTP/3 (`h3` 0.0.8 over `com.netonstream:quic`) is the separate repository
-[http3](https://github.com/netonframework/http3) (`com.netonstream:http3`). Packages: `neton.http` (types),
-`neton.http.h1`, `neton.http.h2`.
+HTTP/2 wiring, and hyper-util 0.1.20's `server::conn::auto` (HTTP/1 and HTTP/2 on one port). HTTP/3 (`h3` 0.0.8 over
+`com.netonstream:quic`) is the separate repository [http3](https://github.com/netonframework/http3)
+(`com.netonstream:http3`). Packages: `neton.http` (types), `neton.http.h1`, `neton.http.h2`, `neton.http.auto`.
 
 Specification, every deliberate difference from the references (marked ⚖️), and the implementation record with all
 measurements: [SPEC.md](SPEC.md).
@@ -21,7 +21,8 @@ targets only (Linux, macOS, iOS, Android native, Windows mingw).
 | HTTP/2 server and client (h2 + hyper `conn::http2`) | done; h2's `tests/h2-tests` and hyper's HTTP/2 tests ported |
 | Upgrades, CONNECT and extended CONNECT tunnels | done |
 | HTTP/3 | in the separate repository [http3](https://github.com/netonframework/http3) (`com.netonstream:http3`, `neton.http.h3`) |
-| Connection pooling, protocol auto-detection (hyper-util) | out of scope for this version |
+| HTTP/1 or HTTP/2 on one port (hyper-util `server::conn::auto`) | done; hyper-util's tests ported; ALPN input added |
+| Connection pooling and the rest of hyper-util | out of scope for this version |
 
 ## Conformance and tests
 
@@ -57,6 +58,11 @@ serveTcp("127.0.0.1", 3000, reactors = 1, shutdownOnSignals = true) { stream ->
 ```
 
 HTTP/2 over cleartext: the same service, with `Http2ServerConfig().serveConnection(stream, service).serve()`.
+
+Both on one port (hyper-util `auto::Builder`): `AutoServerConfig(http1Config, http2Config).serveConnection(stream, service)`
+reads the HTTP/2 connection preface once per connection to pick the protocol (prior-knowledge h2c). Behind TLS, pass the
+negotiated ALPN protocol (`serveConnection(tlsStream, tlsStream.alpn, service)`) and `"h2"` / `"http/1.1"` select the
+protocol without reading first. `serveConnectionWithUpgrades` keeps HTTP/1 upgrades on.
 
 HTTP/1 client (hyper `client::conn::http1`):
 
