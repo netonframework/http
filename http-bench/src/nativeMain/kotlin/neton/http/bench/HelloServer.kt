@@ -5,6 +5,7 @@ package neton.http.bench
 import neton.http.Body
 import neton.http.FullBody
 import neton.http.Response
+import neton.http.auto.AutoServerConfig
 import neton.http.h1.Http1ServerConfig
 import neton.http.h1.HttpService
 import neton.http.h2.Http2ServerConfig
@@ -17,7 +18,8 @@ import kotlinx.cinterop.toKString
  * (hyper's `examples/hello.rs`), the date header on, default options.
  *
  * Arguments: host port [reactors] [pipelineFlush=0|1]. Environment NETON_IO_DRIVER picks the driver; NETON_HTTP_H2=1
- * serves HTTP/2 over cleartext with prior knowledge (hyper's `http2::Builder` defaults) instead of HTTP/1.
+ * serves HTTP/2 over cleartext with prior knowledge (hyper's `http2::Builder` defaults) instead of HTTP/1; NETON_HTTP_AUTO=1
+ * serves both through the auto server (hyper-util `auto::Builder`, the preface decides), with the same HTTP/1 options.
  */
 fun main(args: Array<String>) {
     val host = args.getOrElse(0) { "127.0.0.1" }
@@ -39,10 +41,13 @@ fun main(args: Array<String>) {
     if (platform.posix.getenv("NETON_HTTP_GC_STATS")?.toKString() == "1") startGcStats()
     val h2 = platform.posix.getenv("NETON_HTTP_H2")?.toKString() == "1"
     if (h2) println("h2c")
+    val auto = if (platform.posix.getenv("NETON_HTTP_AUTO")?.toKString() == "1") AutoServerConfig(config) else null
+    if (auto != null) println("auto")
     val service = HttpService { Response<Body>(FullBody(hello)) }   // hyper: Response::new(Full::new(..))
     serveTcp(host, port, reactors = reactors, shutdownOnSignals = true) { stream ->
         runCatching {
-            if (h2) Http2ServerConfig().serveConnection(stream, service).serve()
+            if (auto != null) auto.serveConnection(stream, service).serve()
+            else if (h2) Http2ServerConfig().serveConnection(stream, service).serve()
             else config.serveConnection(stream, service).serve()
         }
     }
