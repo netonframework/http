@@ -279,11 +279,12 @@ internal class RequestStreamInner(
      * SETTINGS_MAX_FIELD_SECTION_SIZE (RFC 9114 §4.2.2: SHOULD NOT send; §7.2.4.2: MUST NOT send what the peer's
      * settings make invalid).
      */
-    suspend fun sendHeaders(header: Header) {
+    suspend fun sendHeaders(header: Header, grease: Boolean = true) {
         val s = sender()
         val block = encode(header)
         try {
             s.writeBuf(WriteBuf.of(Frame.Headers(block)))
+            if (grease) sendGreaseAfterHead()
         } catch (e: StreamErrorIncoming) {
             throw shared.streamError(e)
         }
@@ -310,20 +311,24 @@ internal class RequestStreamInner(
     }
 
     /** Sends trailers (`send_trailers`). @throws StreamError */
-    suspend fun sendTrailers(trailers: HeaderMap<HeaderValue>) = sendHeaders(Header.trailer(trailers))
+    suspend fun sendTrailers(trailers: HeaderMap<HeaderValue>) = sendHeaders(Header.trailer(trailers), grease = false)
 
     /**
-     * Ends the sending side (`finish`), after a GREASE frame on the connection's first request stream (RFC 9114
-     * §7.2.8).
-     * @throws StreamError
+     * The connection's one GREASE frame on a request stream (RFC 9114 §7.2.8), right after the first head. ⚖️ The
+     * reference sends it just before FIN; aioquic 1.2.0's client loses the end of the stream when a frame of unknown
+     * type is the last one before FIN (it hangs on h3's own server the same way), and RFC 9114 allows reserved frames
+     * anywhere, so sending it after the head keeps GREASE exercised and interoperates.
      */
-    suspend fun finish(grease: Boolean = true) {
+    suspend fun sendGreaseAfterHead() {
+        if (!sendGreaseFrame) return
+        sendGreaseFrame = false
+        sender().writeBuf(WriteBuf.of(Frame.Grease))
+    }
+
+    /** Ends the sending side (`finish`). @throws StreamError */
+    suspend fun finish() {
         val s = sender()
         try {
-            if (grease && sendGreaseFrame) {
-                s.writeBuf(WriteBuf.of(Frame.Grease))
-                sendGreaseFrame = false
-            }
             s.finish()
             sendClosed = true
         } catch (e: StreamErrorIncoming) {

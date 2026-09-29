@@ -220,6 +220,7 @@ class SendRequest internal constructor(
                 throw e
             }
             stream.writeBuf(WriteBuf.of(Frame.Headers(block)))
+            inner.sendGreaseAfterHead()
             val result = RequestStream(inner, request.method)
             sendGreaseFrame = false
             handedOff = true

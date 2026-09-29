@@ -346,8 +346,8 @@ class RequestResolver internal constructor(private val inner: RequestStreamInner
     /** Answers a head over a limit with 431 and ends the stream as described in [resolveRequest]. */
     private suspend fun reject431(error: StreamError.HeaderTooBig): Nothing {
         try {
-            inner.sendHeaders(Header.response(StatusCode.REQUEST_HEADER_FIELDS_TOO_LARGE, HeaderMap.new()))
-            inner.finish(grease = false)
+            inner.sendHeaders(Header.response(StatusCode.REQUEST_HEADER_FIELDS_TOO_LARGE, HeaderMap.new()), grease = false)
+            inner.finish()
         } finally {
             inner.stopSending(Code.H3_NO_ERROR)
         }

@@ -1226,3 +1226,10 @@ hyper 的 `proto/h1` 是基于 `poll` 的状态机（`Dispatcher` 反复 `poll_r
   必须通过的各项（含 §6 表中五项）全部通过。**仍未完成 / 限制**：aioquic 客户端在 GREASE 开启时挂住（aioquic 的缺陷，见上；关闭 GREASE
   可互通）；quiche 与 curl `--http3` 未测（153 无 C++ 编译器与 cmake）；h3spec 的 0-RTT 项未实际检验（无 0-RTT）；互通均在本机回环上，
   无丢包与乱序；未做性能对照与 quic-interop-runner；`http-bench` 仍无 HTTP/3 压测程序；互通可执行文件只构建了 linuxX64 与 macosArm64。
+- GREASE 帧位置调整 ⚖️（2026-09-29，所有者决定）：每个连接一次的请求流 GREASE 帧由"FIN 之前"（参考 h3 的位置）改为"首个消息头之后"
+  （服务端在响应头后、客户端在请求头后；trailer 与 431 不带）。原因：aioquic 1.2.0 客户端在保留类型帧紧挨 FIN 时丢失流结束信号而挂起（它对
+  h3 自己的服务端同样挂起）；RFC 9114 §7.2.8 允许保留帧出现在任何位置，GREASE 仍照常演练。测试 `serverGreaseFrameFollowsTheResponseHeadNotTheEnd`、
+  `clientGreaseFrameFollowsTheRequestHeadNotTheEnd`（内存替身、neton.quic 测试替身、真实 TLS 三种变体）断言线上帧序为 HEADERS、GREASE、…、DATA，
+  去掉改动时失败。153 复验（真实 TLS）：aioquic 客户端开启 GREASE 三项全过（此前挂起），关闭 GREASE 三项、本库客户端对 aioquic 服务端 7 项全过；
+  与 h3 examples 及 h3-peer 双向互通全过；h3spec 49 / 49。
+

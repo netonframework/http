@@ -735,6 +735,57 @@ abstract class ConnectionLayerTest {
         assertEquals("chunk0;chunk1;chunk2;chunk3;chunk4;", reader.await())
         server.join()
     }
+    // ---- ⚖️ the GREASE frame on a request stream follows the head (the reference sends it just before FIN) ----
+
+    /** The frame types on a request stream's wire, in order, unknown and reserved ones included. */
+    private fun frameTypes(bytes: ByteArray): List<Long> {
+        val buf = Buffer().also { it.writeBytes(bytes) }
+        val types = ArrayList<Long>()
+        while (buf.readableBytes > 0) {
+            types += neton.http.h3.proto.VarInt.decode(buf)
+            buf.skip(neton.http.h3.proto.VarInt.decode(buf).toInt())
+        }
+        return types
+    }
+
+    @Test
+    fun serverGreaseFrameFollowsTheResponseHeadNotTheEnd() = h3Test {
+        val (cq, sq) = quicPair()
+        val incoming = newConnection(sq)
+        val drive = launch { incoming.run() }
+        cq.openUni().send(controlWithSettings())
+        val raw = cq.openBi()
+        raw.send(Buffer().request(Request.get("http://localhost/").body(Unit)))
+        raw.finish()
+        val (_, s) = getStreamBlocking(incoming)!!
+        s.sendResponse(ok())
+        s.sendData(Bytes.copyOf(byteArrayOf(1, 2, 3)))
+        s.finish()
+        val types = frameTypes(raw.drain())
+        assertEquals(neton.http.h3.proto.FrameType.HEADERS, types.first(), "$types")
+        assertTrue(neton.http.h3.proto.FrameType.isGrease(types[1]), "$types")
+        // aioquic 1.2.0 loses the end of the stream when a reserved frame is the last one before FIN.
+        assertEquals(neton.http.h3.proto.FrameType.DATA, types.last(), "$types")
+        drive.cancel()
+    }
+
+    @Test
+    fun clientGreaseFrameFollowsTheRequestHeadNotTheEnd() = h3Test {
+        val (cq, sq) = quicPair()
+        val (driver, sender) = newClient(cq)
+        val drive = launch { driver.run() }
+        sq.openUni().send(controlWithSettings())
+        val stream = sender.sendRequest(Request.post("http://localhost/").body(Unit))
+        stream.sendData(Bytes.copyOf(byteArrayOf(4, 5, 6)))
+        stream.finish()
+        val raw = sq.acceptBi()
+        val types = frameTypes(raw.drain())
+        assertEquals(neton.http.h3.proto.FrameType.HEADERS, types.first(), "$types")
+        assertTrue(neton.http.h3.proto.FrameType.isGrease(types[1]), "$types")
+        assertEquals(neton.http.h3.proto.FrameType.DATA, types.last(), "$types")
+        drive.cancel()
+    }
+
 }
 
 /** [ConnectionLayerTest] on the in-memory QUIC double. */
