@@ -10,8 +10,11 @@ import neton.io.core.StreamCapability
  * A connection after an HTTP upgrade (hyper `upgrade::Upgraded`, SPEC §3.6): an [IoStream] that first returns the
  * bytes the HTTP connection had already read past the head (hyper `Rewind`), then reads the original stream. It can
  * be handed to another protocol (a WebSocket, a tunnel) directly.
+ *
+ * The auto server (`neton.http.auto`) also uses it as hyper-util's `Rewind`: the bytes read to detect the protocol,
+ * replayed to the chosen one ([rewind] marks such a wrapper, which [downcast] sees through).
  */
-class Upgraded internal constructor(private val io: IoStream, readBuf: Bytes) : IoStream {
+class Upgraded internal constructor(private val io: IoStream, readBuf: Bytes, private val rewind: Boolean = false) : IoStream {
     private var prefix: Bytes? = readBuf.takeIf { it.size > 0 }
 
     override val capabilities: Set<StreamCapability> get() = io.capabilities
@@ -31,11 +34,29 @@ class Upgraded internal constructor(private val io: IoStream, readBuf: Bytes) : 
         io.setTimeouts(readTimeoutMillis, writeTimeoutMillis, idleTimeoutMillis)
     override fun setReadTimeout(millis: Long) = io.setReadTimeout(millis)
 
-    /** hyper `downcast`: the original stream and the bytes already read from it that were not consumed. */
+    /**
+     * hyper `downcast`: the original stream and the bytes already read from it that were not consumed. A connection
+     * served by the auto server runs on its protocol-detection wrapper; that is unwrapped here, its unread bytes
+     * following ours (hyper-util `auto::upgrade::downcast`, which exists only because hyper cannot reach the wrapper).
+     */
     fun downcast(): Pair<IoStream, Bytes> {
         val p = prefix ?: Bytes.EMPTY
         prefix = null
-        return io to p
+        val inner = io
+        if (inner is Upgraded && inner.rewind) {
+            val (original, pre) = inner.downcast()
+            return original to concat(p, pre)
+        }
+        return inner to p
+    }
+
+    private fun concat(a: Bytes, b: Bytes): Bytes {
+        if (b.size == 0) return a
+        if (a.size == 0) return b
+        val out = ByteArray(a.size + b.size)
+        a.copyInto(out, 0)
+        b.copyInto(out, a.size)
+        return Bytes.wrap(out)
     }
 }
 

@@ -81,6 +81,32 @@ class Http1ServerConfig(
 
     /** hyper `Builder::serve_connection`. */
     fun serveConnection(stream: IoStream, service: HttpService): Http1Connection = Http1Connection(stream, service, this)
+
+    /** A copy with some options changed (the hyper builder's setters on a clone). */
+    fun copy(
+        halfClose: Boolean = this.halfClose,
+        keepAlive: Boolean = this.keepAlive,
+        titleCaseHeaders: Boolean = this.titleCaseHeaders,
+        preserveHeaderCase: Boolean = this.preserveHeaderCase,
+        maxHeaders: Int = this.maxHeaders,
+        headerReadTimeoutMillis: Long = this.headerReadTimeoutMillis,
+        keepAliveIdleTimeoutMillis: Long = this.keepAliveIdleTimeoutMillis,
+        writev: Boolean? = this.writev,
+        maxBufSize: Int = this.maxBufSize,
+        autoDateHeader: Boolean = this.autoDateHeader,
+        pipelineFlush: Boolean = this.pipelineFlush,
+        parser: ParserConfig = this.parser,
+        maxRequestLineSize: Int = this.maxRequestLineSize,
+        maxHeaderSectionSize: Int = this.maxHeaderSectionSize,
+        lenientTeWithCl: Boolean = this.lenientTeWithCl,
+        maxRequestBodySize: Long = this.maxRequestBodySize,
+        upgrades: Boolean = this.upgrades,
+        admission: neton.io.core.Admission? = this.admission,
+    ) = Http1ServerConfig(
+        halfClose, keepAlive, titleCaseHeaders, preserveHeaderCase, maxHeaders, headerReadTimeoutMillis,
+        keepAliveIdleTimeoutMillis, writev, maxBufSize, autoDateHeader, pipelineFlush, parser, maxRequestLineSize,
+        maxHeaderSectionSize, lenientTeWithCl, maxRequestBodySize, upgrades, admission,
+    )
 }
 
 /** Serves HTTP/1 on [stream] until the connection ends (hyper `serve_connection(...).await`); see [Http1Connection.serve]. */
@@ -96,7 +122,13 @@ suspend fun serveHttp1(stream: IoStream, config: Http1ServerConfig = Http1Server
  * closes (with [Http1ServerConfig.halfClose] off) cancels the exchange and ends the connection with
  * [HttpError.Kind.IncompleteMessage].
  */
-class Http1Connection internal constructor(private val stream: IoStream, private val service: HttpService, private val config: Http1ServerConfig) {
+class Http1Connection internal constructor(
+    private val stream: IoStream,
+    private val service: HttpService,
+    private val config: Http1ServerConfig,
+    /** [Http1ServerConfig.upgrades], or the auto connection's choice (hyper-util calls `with_upgrades` or not). */
+    private val upgrades: Boolean = config.upgrades,
+) {
     private val io = H1Io(stream, config.maxBufSize)
     private val conn = H1Conn(io, isServer = true, config.h1Config())
 
@@ -294,7 +326,7 @@ class Http1Connection internal constructor(private val stream: IoStream, private
         val body: Body = response.body
         val bodyLen: Long? = if (body.isEndStream) null else body.exactLength.let { if (it < 0) OutgoingBody.UNKNOWN else it }
         val status = response.status
-        switched = config.upgrades && pendingUpgrade != null &&
+        switched = upgrades && pendingUpgrade != null &&
             (status.asU16() == 101 || conn.method === Method.CONNECT && status.isSuccess())
         io.writeLock.withLock { conn.writeHead(response.parts, bodyLen) }
         conn.error?.let { e ->
@@ -366,7 +398,7 @@ class Http1Connection internal constructor(private val stream: IoStream, private
         if (pending != null) {
             pendingUpgrade = null
             when {
-                !config.upgrades -> pending.fail(HttpError(HttpError.Kind.UserManualUpgrade))
+                !upgrades -> pending.fail(HttpError(HttpError.Kind.UserManualUpgrade))
                 !switched -> pending.fail(HttpError(HttpError.Kind.UserNoUpgrade))
                 else -> {
                     flushLocked()
