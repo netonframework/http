@@ -423,6 +423,11 @@ class RequestStream internal constructor(private val inner: RequestStreamInner, 
      * Releases the stream (the reference's `Drop`): an unfinished response is reset with H3_REQUEST_CANCELLED, and an
      * unfinished request is stopped with H3_NO_ERROR once the response is complete (RFC 9114 §4.1), else
      * H3_REQUEST_CANCELLED.
+     *
+     * Call it (or `use { }`) once done with the request, also after [finish]: where Rust drops the stream, Kotlin has to
+     * close it. Until then a request whose end was not read keeps its QUIC stream open, and with it one of the
+     * client's bidirectional stream credits; a server that never closes its streams stops receiving requests on the
+     * connection once those credits are used up (100 by default).
      */
     override fun close() {
         val responded = inner.sendClosed || inner.send == null

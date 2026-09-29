@@ -435,6 +435,50 @@ abstract class EndToEndTest {
         h.loop.shutdown()
     }
 
+    /**
+     * A server request stream keeps its QUIC stream until it is closed (the reference's Drop), whether or not the
+     * response is finished: a request whose FIN is never read holds one of the client's stream credits. After 100
+     * such requests (QUIC's default limit of concurrent bidirectional streams) the 101st waits; closing the held
+     * streams releases them and it proceeds. Handlers should therefore `use { }` the stream (found by interop: an
+     * interop server that never closed its GET streams stalled after about 100 requests).
+     */
+    @Test
+    fun request_streams_hold_their_quic_streams_until_closed() = h3Test(120.seconds) {
+        val h = h3Pair()
+        val held = ArrayList<ServerRequestStream>()
+        serve(h.server) { _, stream ->
+            stream.sendResponse(ok())
+            stream.finish()
+            held += stream // neither the request's end read nor closed
+        }
+        repeat(100) { i ->
+            val s = h.send.sendRequest(Request.get("https://localhost/$i").body(Unit))
+            s.finish()
+            assertEquals(StatusCode.OK, s.recvResponse().status)
+            assertNull(s.recvData())
+        }
+        val next = async { h.send.sendRequest(Request.get("https://localhost/next").body(Unit)) }
+        delay(1000)
+        assertTrue(next.isActive, "the 101st request waits for stream credit")
+        eventually { held.size == 100 }
+        held.toList().forEach { it.close() }
+        val s = next.await()
+        s.finish()
+        assertEquals(StatusCode.OK, s.recvResponse().status)
+        // With close() after each response, many more requests go through on the same connection.
+        held.clear()
+        repeat(150) { i ->
+            val r = h.send.sendRequest(Request.get("https://localhost/more/$i").body(Unit))
+            r.finish()
+            assertEquals(StatusCode.OK, r.recvResponse().status)
+            assertNull(r.recvData())
+            eventually { held.isNotEmpty() }
+            held.toList().forEach { it.close() }
+            held.clear()
+        }
+        h.loop.shutdown()
+    }
+
     /** Without "h3" in common the QUIC handshake fails (no_application_protocol); HTTP/3 never starts. */
     @Test
     fun alpn_mismatch_fails_the_handshake() = h3Test {

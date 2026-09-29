@@ -87,9 +87,11 @@ while (true) {
         val conn = neton.http.h3.server.newConnection(quic.asH3())
         while (true) {
             val (request, stream) = conn.accept()?.resolveRequest() ?: break
-            stream.sendResponse(Response.builder().status(200).body(Unit))
-            stream.sendData(Bytes.copyOf("hello".encodeToByteArray()))
-            stream.finish()
+            stream.use {   // close() releases the QUIC stream, as dropping it does in h3
+                it.sendResponse(Response.builder().status(200).body(Unit))
+                it.sendData(Bytes.copyOf("hello".encodeToByteArray()))
+                it.finish()
+            }
         }
     }
 }
@@ -104,6 +106,10 @@ stream.finish()
 val response = stream.recvResponse()
 while (true) stream.recvData() ?: break
 ```
+
+Close each server `RequestStream` when done with it (`use { }`): it is h3's `Drop`. Until then a request whose body
+was not read to its end keeps its QUIC stream, and with it one of the client's stream credits (100 concurrent
+bidirectional streams by default), so a server that never closes them stops accepting requests on that connection.
 
 A server certificate that does not chain to the client's trust anchors or does not match the server name fails the
 handshake, as does a peer without "h3". The KDoc of `neton.http.h3.quic.ALPN_H3` has the details.
