@@ -141,6 +141,10 @@ class Http1Connection internal constructor(
     private val call = ServiceCall(service)
 
     private var inFlight = false
+    // True while the exchange waits for a suspended service call. A body finished before that (buffered with the head,
+    // read by a service still running on this call) needs no watch: a service that then returns without suspending
+    // leaves nothing to cancel, and one that suspends starts the watch at its suspension point in [exchange].
+    private var serviceSuspended = false
     private var watch: Job? = null
     private var watchError: HttpError? = null
     private var pendingUpgrade: OnUpgrade? = null
@@ -160,7 +164,7 @@ class Http1Connection internal constructor(
         if (!config.keepAlive) conn.disableKeepAlive()
         io.queueStrategy = config.writev ?: true
         io.flushPipeline = config.pipelineFlush
-        conn.onBodyDone = { maybeStartWatch() }
+        conn.onBodyDone = { if (serviceSuspended) maybeStartWatch() }
         if (replay.size > 0) io.readBuf.writeBytes(replay)
     }
 
@@ -303,7 +307,11 @@ class Http1Connection internal constructor(
             call.request = request
             val response = try {
                 val r = serviceCall.start(call)
-                if (r === COROUTINE_SUSPENDED) { maybeStartWatch(); serviceCall.await() } else r as Response<out Body>
+                if (r === COROUTINE_SUSPENDED) {
+                    serviceSuspended = true
+                    maybeStartWatch()
+                    try { serviceCall.await() } finally { serviceSuspended = false }
+                } else r as Response<out Body>
             } catch (e: CancellationException) {
                 throw watchError ?: e
             } catch (e: Throwable) {

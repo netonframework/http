@@ -817,3 +817,38 @@ HTTP/3（复刻 `h3` 0.0.8，在 `com.netonstream:quic` 上）于 2026-09-29 独
     逐函数差分中不再有 auto 或包装的函数。`Upgraded` 恢复原样。
   - HTTP/2 经 auto 与直接相比只多握手前的一次检测（每连接），未单独测量。
 - 未做：真实 TLS 上的 ALPN 端到端（本库不依赖 `tls`，测试以字符串代替 `TlsStream.alpn`，由引擎适配器接入时验证）。
+
+### HTTP/1 断连监视只在服务挂起时启动（2026-10-01）
+
+背景：`onBodyDone` 在请求体读完时就启动断连监视（hyper `mid_message_detect_eof` 的对应物：交换进行中读下一段，发现客户端关闭）。
+请求体与请求头一起到达、服务同步返回的请求（Arena baseline 的全部 POST）也要为此 launch 一个协程、挂一次读、在下一个请求到达时
+恢复并完成 Job，再由 `awaitIdleRead` 以 `withTimeoutOrNull` + `join` 等它。按诊断构建的分配统计（`bench-arena/measure.py`，
+-Xallocator=std 下拦截的分配调用），NetonStream 每请求 160.9 次，其中这条路径约 30 次（Job 完成收尾约 22 次由 reactor 执行）。
+
+改动：`serviceSuspended` 仅在 `exchange` 等待已挂起的服务时为真；`onBodyDone` 只在这时启动监视。服务同步返回时没有可取消的东西；
+服务挂起时 `exchange` 在挂起点照旧调用 `maybeStartWatch()`；服务挂起期间读完请求体时 `onBodyDone` 仍启动监视。响应体
+待产出（`onPending`）的路径不变。
+
+测试（`nativeTest/h1/DeferredWatchTest`，5 个，确定性，无计时）：缓冲好的 POST 在同步响应前不发起预读（修改前失败）；缓冲好的 POST 后
+服务挂起、分段到达的请求体后服务挂起、响应体挂起时，客户端关闭仍被发现并得到 IncompleteMessage。第 5 个——响应写入因背压挂起时
+客户端关闭——修改前后都失败，是既有缺陷而非本改动引起：写在连接自己的协程里、不在 `exchangeJob` 下，且写挂起时没有监视读端；
+以 `@Ignore` 标注保留，单独修复。全量：macOS 内存与 TCP 传输各 1233（15 跳过：原 14 个加上这一个）；Linux arm64（Colima）io_uring 与
+epoll 各 1219 通过。
+
+测量（完整 Arena neton 条目 beta21 的 Linux arm64 release 构建，只把 io 换成含 accept 修复的本地版本（io SPEC §32），实验方再把 http
+换成本修改；Colima 服务端 CPU 0、wrk CPU 1，GET / Content-Length POST / chunked POST 混合，每轮 10 秒，响应逐字节校验，
+`bench-arena/linux-watch-ab.py` 交替 3 对，`ab-summary.py` 汇总；本地单核，不代表 Arena 64 核）：
+
+| 驱动 / 连接 | 修改前 RPS 中位数 | 修改后 | 逐对比值 | 每请求 CPU | p99 |
+| --- | ---: | ---: | --- | --- | --- |
+| io_uring / 256 | 82,129 | 118,165 | 1.40 / 1.47 / 1.43 | 12.16 → 8.46 µs | 16–20 → 28–34 ms |
+| epoll / 256 | 64,380 | 83,729 | 1.29 / 1.34 / 1.30 | 15.53 → 11.92 µs | 24–29 → 23–26 ms |
+| io_uring / 4096 | 57,484 | 75,741 | 1.34 / 1.32 / 1.27 | 17.46 → 13.24 µs | 185–190 → 127–156 ms |
+
+所有轮次无 socket / 状态 / 超时错误。io_uring 256 连接的 p99 变差，原因未查，记为待查项。
+
+更正 2026-09-30 的否决结论：当时两个原型在 epoll 下 +31%、在 io_uring 下 −9% / −13%，据此否决。那组 io_uring 数据受 io 的 accept 缺陷
+（io SPEC §32）干扰：每轮测量前的预热留下关闭风暴，新连接在负载下每秒只被 accept 约 100 个，256 个连接要 2 秒多才全部接入，
+测量窗口里实际在服务的连接数不同，结果不可比。修复 accept 后重测（上表），io_uring 同样提升。那两个原型都把整个交换放进
+InlineCall（改动更大，也改变了写的取消路径），本次只采用最小改动；原型补丁与当时的记录保留在 `../bench-arena/`
+（`http-deferred-watch-v2.patch`、`watch-ab-builds.json`、`results/watch-*`）。
