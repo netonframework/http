@@ -3,6 +3,6 @@ plugins {
 }
 allprojects {
     group = "com.netonstream"
-    version = "0.1.1-SNAPSHOT"
+    version = "0.1.1"
 }
 apply(from = "gradle/publishing.gradle.kts")

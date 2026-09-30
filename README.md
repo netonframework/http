@@ -11,7 +11,7 @@ measurements: [SPEC.md](SPEC.md).
 
 ## Status
 
-Release coordinate: `com.netonstream:http:0.1.0`, built against `com.netonstream:io:0.1.0`. Kotlin 2.4.0, native
+Release coordinate: `com.netonstream:http:0.1.1`, built against `com.netonstream:io:0.1.1`. Kotlin 2.4.0, native
 targets only (Linux, macOS, iOS, Android native, Windows mingw).
 
 | Area | State |
