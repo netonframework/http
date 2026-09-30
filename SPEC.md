@@ -275,6 +275,7 @@ com.netonstream:io（IoStream / Framed / Buffer / Bytes / 反应器 / 准入 / �
 | 1xx 后等待最终响应（客户端） | 是 | 是 | 是 |
 | 头部读取 / 空闲超时 | 30 s（两者合一） | 10 s / 60 s | **10 s / 60 s** |
 | 请求体上限 | 无 | 10 MiB | **10 MiB**（`maxRequestBodySize`） |
+| 请求体读取时限 | 无 | —（2026-10-01 增补） | 默认关闭；`bodyReadTimeoutMillis` 为从首次等待请求体字节起到请求体结束的总时限 |
 | 上传时的应用缓冲 | 一个读缓冲 + 一个块 | 同 | 同；100 MB 上传测试见 §6 |
 
 ### 3.10 在 neton.io 上的落地设计（2026-09-28）
@@ -852,3 +853,19 @@ epoll 各 1219 通过。
 测量窗口里实际在服务的连接数不同，结果不可比。修复 accept 后重测（上表），io_uring 同样提升。那两个原型都把整个交换放进
 InlineCall（改动更大，也改变了写的取消路径），本次只采用最小改动；原型补丁与当时的记录保留在 `../bench-arena/`
 （`http-deferred-watch-v2.patch`、`watch-ab-builds.json`、`results/watch-*`）。
+
+### HTTP/1 请求体读取时限（2026-10-01）
+
+⚖️ 新配置 `Http1ServerConfig.bodyReadTimeoutMillis`（默认 0 即关闭，hyper 无此项）：从服务端**第一次需要等待**请求体字节起，到请求体结束的
+总时限。实现与请求头超时相同：每次读之前把剩余时间设为流的读超时（neton-io 的按连接截止时间，时间轮计时），读完清零；新请求头与请求体
+结束时复位。超时时关闭读方向（写方向保留），请求体的读取以 `HttpError(Kind.Body, TimeoutException)` 失败（`isTimeout()` 为真），服务
+仍可作答（如 408），之后连接关闭。与请求头一起到达的请求体从不启动计时。需要 `StreamCapability.ReadTimeout`，不具备时构造即拒绝。
+
+动机：Neton 引擎适配器原先以 kotlinx `withTimeout` 包住每个 POST 的请求体读取（30 s 总时限）。cachegrind 测量完整 Arena neton 条目（Linux
+arm64，epoll，GET / CL POST / chunked POST 各三分之一）：去掉这层 `withTimeout` 每请求从 66,143 降到 62,032 条指令（每个 POST 约 6,200 条：
+TimeoutCoroutine、Job 收尾、计时器与时钟读取）。改由本配置实现后，已缓冲的请求体零成本，只有真正等待时才用流的读超时。
+
+测试（`nativeTest/h1/BodyReadTimeoutTest`，6 个，真实 TCP）：请求体停止到达 → 服务得到超时错误、回 408、连接关闭；请求体随请求头已缓冲
+时服务延迟 400 ms（超过时限）再读也不超时；分段到达但在时限内正常读完；keep-alive 上每个请求各自计时；无读超时能力的流被拒绝；0 关闭。
+全量：macOS 内存与 TCP 传输各 1239（15 跳过）；Linux arm64（Colima）io_uring 与 epoll 各 1225 通过。HTTP/2 不在本项范围（仍由适配器计时）。
+

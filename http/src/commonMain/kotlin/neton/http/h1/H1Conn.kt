@@ -193,6 +193,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
 
     /** The rest of hyper `poll_read_head` after a successful parse. */
     private fun afterHead(msgKeepAlive: Boolean, msgVersion: Version, length: Long, expectContinue: Boolean) {
+        bodyDeadline = 0L
         busy()
         if (!msgKeepAlive) keepAlive = KA.DISABLED
         version = msgVersion
@@ -327,13 +328,27 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
                     throw bodyError!!
                 }
                 DecodeResult.NEED_MORE -> {
+                    // ⚖️ Body timeout: armed on the first wait only, so a body buffered with its head costs nothing.
+                    val timeout = if (isServer) config.bodyReadTimeoutMillis else 0L
+                    if (timeout > 0) {
+                        val now = neton.io.core.monotonicNanos() / 1_000_000
+                        if (bodyDeadline == 0L) bodyDeadline = now + timeout
+                        io.stream.setReadTimeout((bodyDeadline - now).coerceAtLeast(1))
+                    }
                     val n = try {
                         io.readFromIo()
+                    } catch (e: TimeoutException) {
+                        // The read side is done; the write side stays for the service's answer, then the connection closes.
+                        closeRead()
+                        bodyError = HttpError(HttpError.Kind.Body, e)
+                        throw bodyError!!
                     } catch (e: IoException) {
                         if (reading == Reading.CLOSED) throw bodyClosedError()    // the connection ended under the read
                         close()
                         bodyError = HttpError(HttpError.Kind.Body, e)
                         throw bodyError!!
+                    } finally {
+                        if (timeout > 0) io.stream.setReadTimeout(0)
                     }
                     if (generation != bodyGeneration) return null
                 }
@@ -346,6 +361,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
      * channel, even when [tryKeepAlive] closes the connection now) and keep-alive is decided.
      */
     private fun endOfBody() {
+        bodyDeadline = 0L
         reading = Reading.KEEP_ALIVE
         bodyGeneration++
         tryKeepAlive()
@@ -360,6 +376,9 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
     var onBodyDone: () -> Unit = {}
 
     private var bodyError: HttpError? = null
+
+    /** Monotonic ms by which the body being read must end (Http1ServerConfig.bodyReadTimeoutMillis); 0: not armed. */
+    private var bodyDeadline = 0L
 
     private fun bodyClosedError(): HttpError = bodyError ?: HttpError(HttpError.Kind.IncompleteMessage)
 

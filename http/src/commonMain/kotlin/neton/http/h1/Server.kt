@@ -72,11 +72,19 @@ class Http1ServerConfig(
      * [headerReadTimeoutMillis] on so a permit holder cannot stall its head.
      */
     val admission: neton.io.core.Admission? = null,
+    /**
+     * ⚖️ Time a request body may take once the server first has to wait for its bytes, to its end (hyper has none);
+     * 0 disables. Expiry closes the read side and fails the body's read with [HttpError.Kind.Body] caused by a
+     * [neton.io.core.TimeoutException] ([HttpError.isTimeout]); the service may still answer (e.g. 408), then the
+     * connection closes. A body already buffered with its head never arms it. Needs [StreamCapability.ReadTimeout].
+     */
+    val bodyReadTimeoutMillis: Long = 0,
 ) {
     internal fun h1Config() = H1Config(
         parser = parser, maxHeaders = maxHeaders, maxHeaderSectionSize = maxHeaderSectionSize,
         maxRequestLineSize = maxRequestLineSize, lenientTeWithCl = lenientTeWithCl, titleCaseHeaders = titleCaseHeaders,
         preserveHeaderCase = preserveHeaderCase, maxRequestBodySize = maxRequestBodySize,
+        bodyReadTimeoutMillis = bodyReadTimeoutMillis,
     )
 
     /** hyper `Builder::serve_connection`. */
@@ -102,10 +110,11 @@ class Http1ServerConfig(
         maxRequestBodySize: Long = this.maxRequestBodySize,
         upgrades: Boolean = this.upgrades,
         admission: neton.io.core.Admission? = this.admission,
+        bodyReadTimeoutMillis: Long = this.bodyReadTimeoutMillis,
     ) = Http1ServerConfig(
         halfClose, keepAlive, titleCaseHeaders, preserveHeaderCase, maxHeaders, headerReadTimeoutMillis,
         keepAliveIdleTimeoutMillis, writev, maxBufSize, autoDateHeader, pipelineFlush, parser, maxRequestLineSize,
-        maxHeaderSectionSize, lenientTeWithCl, maxRequestBodySize, upgrades, admission,
+        maxHeaderSectionSize, lenientTeWithCl, maxRequestBodySize, upgrades, admission, bodyReadTimeoutMillis,
     )
 }
 
@@ -153,10 +162,10 @@ class Http1Connection internal constructor(
     private var waitingForHead = false
 
     init {
-        require(config.headerReadTimeoutMillis >= 0 && config.keepAliveIdleTimeoutMillis >= 0)
-        if (config.headerReadTimeoutMillis > 0 || config.keepAliveIdleTimeoutMillis > 0) {
+        require(config.headerReadTimeoutMillis >= 0 && config.keepAliveIdleTimeoutMillis >= 0 && config.bodyReadTimeoutMillis >= 0)
+        if (config.headerReadTimeoutMillis > 0 || config.keepAliveIdleTimeoutMillis > 0 || config.bodyReadTimeoutMillis > 0) {
             require(StreamCapability.ReadTimeout in stream.capabilities) {
-                "header read / keep-alive idle timeouts need a stream with ReadTimeout; set them to 0 for this stream"
+                "header read / keep-alive idle / body read timeouts need a stream with ReadTimeout; set them to 0 for this stream"
             }
         }
         conn.allowHalfClose = config.halfClose

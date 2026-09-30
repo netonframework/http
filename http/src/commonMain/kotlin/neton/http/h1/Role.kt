@@ -66,6 +66,8 @@ class H1Config(
     val h09Responses: Boolean = false,
     /** ⚖️ Server: request body limit (SPEC §3.7); 0 disables. */
     val maxRequestBodySize: Long = 0,
+    /** ⚖️ Server: from the first wait for body bytes to the body's end (Http1ServerConfig.bodyReadTimeoutMillis); 0 disables. */
+    val bodyReadTimeoutMillis: Long = 0,
 )
 
 /** A reason phrase different from the canonical one (hyper `ext::ReasonPhrase`), kept as an extension. */
