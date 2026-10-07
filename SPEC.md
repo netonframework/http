@@ -903,3 +903,25 @@ TimeoutCoroutine、Job 收尾、计时器与时钟读取）。改由本配置实
 代价（153，cachegrind，hello，每轮两次）：修改前 11,286 / 11,274，修改后 11,323 / 11,366 条指令每请求（约 +60，0.5%）；类浏览器
 请求 25,351 / 25,296 对 25,277 / 25,373（无差别）。
 
+### HTTP/2 服务端的握手、空闲与请求体时限（2026-10-08）
+
+⚖️ hyper 与 h2 的 HTTP/2 服务端只有 keep-alive ping（默认关闭），一个不发前言、空闲或请求体发到一半就停的连接会被一直占着（评审：
+`Http2ServerConfig` 没有握手、空闲、请求体时限；此前由 Neton 引擎适配器自己计时）。参照 Go net/http2 服务端与本库 HTTP/1 的同类配置，
+`Http2ServerConfig` 增加三项，默认都关闭：
+- `handshakeTimeout`：从连接开始到收到客户端前言与第一个 SETTINGS。超时关闭连接，`serve()` 抛 `HttpError(Kind.Io, TimeoutException)`
+  （`isTimeout()` 为真）。只在握手时用一次 `withTimeoutOrNull`。
+- `idleTimeout`：连接上没有打开的流达到该时长即平滑关闭（GOAWAY NO_ERROR，之后连接结束；Go 的 `IdleTimeout`）。"打开的流"取 h2 层自己的
+  计数（`hasStreams()`），CONNECT 隧道也算在内。一个协程每四分之一时限查看一次：有打开的流或自上次查看以来接受过新流即记为忙；距上次忙
+  达到时限加一个间隔才关闭（最后一个流可能在那次查看后才结束），所以关闭发生在空闲后 1 到 1.5 个时限之间。每个请求只多一次计数加一。
+- `bodyReadTimeout`：每个流从服务第一次需要等待请求体数据起到请求体结束的总时限，与 HTTP/1 的 `bodyReadTimeoutMillis` 相同；已收到的数据
+  从不启动计时（只在 `RecvStream.data` 得到 PENDING 时以剩余时间 `withTimeoutOrNull` 等待），不配置时不分配计时器。超时时请求体的读取以
+  `HttpError(Kind.Body, TimeoutException)` 失败，服务仍可作答（如 408）；交换结束时未读完的请求体照常被丢弃、流被重置。连接不受影响。
+- 不做单独的请求头时限：HTTP/2 的请求头作为 HEADERS / CONTINUATION 帧到达，已有请求头列表大小上限；慢速发送整个连接由空闲与 keep-alive
+  覆盖。
+- 自动协议服务端（`auto`）把同一个 `Http2ServerConfig` 交给 HTTP/2，三项同样生效。
+
+测试（`nativeTest/h2/ServerTimeoutsTest`，8 个，真实 TCP）：不发前言的连接在时限后关闭并报超时；握手完成后握手时限不再起作用；空闲连接
+在 200–1000 ms 内被平滑关闭（实测约 300 ms，时限 200 ms）；每 80 ms 一个请求、以及一个持续 3.5 个时限的慢请求都不触发空闲关闭；请求体
+发 3 字节后停止 → 408，同一连接上的下一个请求照常；请求体已随请求到达而服务先等 400 ms 再读不超时；分段在时限内到达照常读完；非正时长被拒绝。
+全量 macOS 1236 通过、14 跳过（此前 1228 + 新增 8）；153（Linux x64）io_uring 全量 1237 通过，epoll 下本组 8 个通过。
+

@@ -1,5 +1,9 @@
 package neton.http.h2
 
+import kotlin.coroutines.coroutineContext
+import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -7,9 +11,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import neton.http.Body
 import neton.http.HttpError
 import neton.http.Incoming
@@ -27,10 +33,8 @@ import neton.http.header.HeaderName
 import neton.http.header.HeaderValue
 import neton.io.bytes.Bytes
 import neton.io.core.IoStream
-import kotlin.coroutines.coroutineContext
-import kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.seconds
+import neton.io.core.TimeoutException
+import neton.io.core.monotonicNanos
 
 // hyper's HTTP/2 server (hyper 1.11.1 `src/proto/h2/server.rs` and `src/server/conn/http2.rs`) on the h2 server of
 // this package: a service called per stream, `Request<Incoming>` bodies read from the stream, response bodies pumped
@@ -58,6 +62,9 @@ class Http2ServerConfig {
     internal var headerTableSize: Int? = null
     internal var maxHeaderListSize = DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE
     internal var dateHeader = true
+    internal var handshakeTimeout: Duration? = null
+    internal var idleTimeout: Duration? = null
+    internal var bodyReadTimeout: Duration? = null
 
     /** Remotely reset streams allowed pending accept before GOAWAY ENHANCE_YOUR_CALM (null: the h2 default, 20). */
     fun maxPendingAcceptResetStreams(max: Int?) = apply { maxPendingAcceptResetStreams = max }
@@ -123,6 +130,38 @@ class Http2ServerConfig {
     /** Adds a Date header to responses that have none (default on). */
     fun autoDateHeader(enabled: Boolean) = apply { dateHeader = enabled }
 
+    /**
+     * ⚖️ The time from the connection's start to the client's preface and first SETTINGS (hyper and h2 have none; Go's
+     * net/http2 bounds it with the server's read deadline). On expiry the connection closes and [Http2Connection.serve]
+     * throws a timeout ([HttpError.isTimeout]). Default: none.
+     */
+    fun handshakeTimeout(timeout: Duration?) = apply {
+        require(timeout == null || timeout.isPositive()) { "handshakeTimeout must be positive" }
+        handshakeTimeout = timeout
+    }
+
+    /**
+     * ⚖️ A connection without an open stream for this long is shut down gracefully: GOAWAY, then the connection ends
+     * (Go's net/http2 `IdleTimeout`; hyper and h2 have none, only keep-alive pings). The idle time is checked every
+     * quarter of it, so the shutdown comes between 1 and 1.5 times the timeout after the last stream. Default: none.
+     */
+    fun idleTimeout(timeout: Duration?) = apply {
+        require(timeout == null || timeout.isPositive()) { "idleTimeout must be positive" }
+        idleTimeout = timeout
+    }
+
+    /**
+     * ⚖️ Per stream, the time from the first wait for request body data to the body's end, as
+     * `Http1ServerConfig.bodyReadTimeoutMillis` (hyper has none). Data already received never arms it. On expiry the
+     * body read fails with [HttpError.Kind.Body] caused by a timeout ([HttpError.isTimeout]); the service may still
+     * answer (e.g. 408), and the stream is reset once the exchange ends, as for any body not read to its end. Default:
+     * none.
+     */
+    fun bodyReadTimeout(timeout: Duration?) = apply {
+        require(timeout == null || timeout.isPositive()) { "bodyReadTimeout must be positive" }
+        bodyReadTimeout = timeout
+    }
+
     /** hyper `Builder::serve_connection`: the connection, to [Http2Connection.serve]. */
     fun serveConnection(stream: IoStream, service: HttpService): Http2Connection = serveConnection(stream, service, Bytes.EMPTY)
 
@@ -146,7 +185,8 @@ class Http2ServerConfig {
             // A server with keep-alive always pings while idle, to close dead connections more aggressively.
             keepAliveWhileIdle = true,
         )
-        return Http2Connection(stream, service, builder, ping, dateHeader, replay)
+        val timeouts = H2ServerTimeouts(handshakeTimeout, idleTimeout, bodyReadTimeout?.inWholeNanoseconds ?: 0L)
+        return Http2Connection(stream, service, builder, ping, dateHeader, replay, timeouts)
     }
 
     private companion object {
@@ -188,6 +228,7 @@ class Http2Connection internal constructor(
     private val pingConfig: PingConfig,
     private val dateHeader: Boolean,
     private val replay: Bytes = Bytes.EMPTY,
+    private val timeouts: H2ServerTimeouts = H2ServerTimeouts.NONE,
 ) {
     private var conn: neton.http.h2.server.Connection? = null
     private var closePending = false
@@ -201,7 +242,12 @@ class Http2Connection internal constructor(
      */
     suspend fun serve() {
         val h2 = try {
-            builder.handshake(stream, replay)
+            val limit = timeouts.handshake
+            if (limit == null) builder.handshake(stream, replay)
+            else withTimeoutOrNull(limit) { builder.handshake(stream, replay) } ?: run {
+                stream.close()
+                throw HttpError(HttpError.Kind.Io, TimeoutException("HTTP/2 handshake not completed within $limit"))
+            }
         } catch (e: H2Error) {
             throw newH2(e)
         }
@@ -217,6 +263,7 @@ class Http2Connection internal constructor(
                 }
             }
             val ponger = if (pingConfig.isEnabled) startPonger(h2, this) else null
+            val idler = timeouts.idle?.let { launch { closeWhenIdle(h2, it) } }
             val streams = SupervisorJob(coroutineContext.job)
             val streamScope = CoroutineScope(coroutineContext + streams)
             var dropConnection = false
@@ -241,6 +288,7 @@ class Http2Connection internal constructor(
                 }
             } finally {
                 ponger?.cancel()
+                idler?.cancel()
                 streams.cancel()
                 if (dropConnection) runner.cancel()
             }
@@ -255,6 +303,32 @@ class Http2Connection internal constructor(
     fun gracefulShutdown() {
         val c = conn
         if (c == null) closePending = true else c.gracefulShutdown()
+    }
+
+    /** Streams accepted so far: the idle check sees a stream that opened and closed between two of its looks. */
+    private var accepted = 0L
+
+    /**
+     * Graceful shutdown once the connection has had no open stream for [limit] (Http2ServerConfig.idleTimeout). Looks
+     * every quarter of it; a look that finds an open stream, or a stream accepted since the previous look, marks the
+     * connection busy. Requiring the limit plus one interval since the last busy look keeps the idle time at least
+     * [limit] (the last stream may have closed right after that look).
+     */
+    private suspend fun closeWhenIdle(h2: neton.http.h2.server.Connection, limit: Duration) {
+        val step = limit / 4
+        var lastBusy = monotonicNanos()
+        var seen = accepted
+        while (true) {
+            delay(step)
+            val now = monotonicNanos()
+            if (h2.hasStreams() || accepted != seen) {
+                seen = accepted
+                lastBusy = now
+            } else if (now - lastBusy >= (limit + step).inWholeNanoseconds) {
+                h2.gracefulShutdown()
+                return
+            }
+        }
     }
 
     private fun startPonger(h2: neton.http.h2.server.Connection, scope: CoroutineScope): Job {
@@ -279,13 +353,14 @@ class Http2Connection internal constructor(
     /** Hands an accepted stream to a service coroutine (`poll_server`); false for a CONNECT with a body. */
     private fun dispatch(req: Request<RecvStream>, respond: SendResponse, scope: CoroutineScope): Boolean {
         val contentLength = contentLengthParseAll(req.headers)
+        accepted++
         val ping = recorder.clone()
         // Record the headers received.
         ping.recordNonData()
         val body: Incoming
         var connect: ConnectParts? = null
         if (req.method != Method.CONNECT) {
-            body = h2Incoming(req.body, contentLength, ping)
+            body = h2Incoming(req.body, contentLength, ping, timeouts.bodyTimer())
         } else {
             if (contentLength > 0) {
                 // "h2 connect request with non-zero body not supported"
@@ -411,5 +486,15 @@ class Http2Connection internal constructor(
                 reply.sendReset(Reason.INTERNAL_ERROR)
                 throw newH2(e)
             }
+    }
+}
+
+/** The ⚖️ server timeouts (Http2ServerConfig): null / 0 = none. */
+internal class H2ServerTimeouts(val handshake: Duration?, val idle: Duration?, private val bodyReadNanos: Long) {
+    /** A fresh timer for one request body, or null without a body read timeout. */
+    fun bodyTimer(): BodyReadTimer? = if (bodyReadNanos > 0) BodyReadTimer(bodyReadNanos) else null
+
+    companion object {
+        val NONE = H2ServerTimeouts(null, null, 0)
     }
 }

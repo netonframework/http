@@ -141,12 +141,15 @@ class RecvStream internal constructor(private val flow: FlowControl) : AutoClose
      * The next DATA payload, or null at the end of the data (`data`).
      * @throws H2Error when the stream or the connection failed.
      */
-    suspend fun data(): Bytes? {
+    suspend fun data(): Bytes? = data(null)
+
+    /** [data] whose waits for the peer are bounded by [timer] (a server's request body read timeout). */
+    internal suspend fun data(timer: BodyReadTimer?): Bytes? {
         while (true) {
             val r = flow.live()
             val v = h2Call { r.streams.recv.pollData(r.stream) }
             when {
-                v === Recv.PENDING -> r.stream.recvTask.await()
+                v === Recv.PENDING -> if (timer == null) r.stream.recvTask.await() else timer.await(r.stream.recvTask)
                 v == null -> return null
                 else -> {
                     val payload = v as Bytes

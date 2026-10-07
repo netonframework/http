@@ -42,6 +42,8 @@ These are stricter than hyper, and each one is configurable:
 - The request line is limited to 8 KiB and the header section to 64 KiB.
 - Request bodies are limited to 10 MiB (413).
 - Header read timeout 10 s, keep-alive idle timeout 60 s.
+- HTTP/2 servers can bound the handshake, idle connections and request body reads (`Http2ServerConfig`
+  `handshakeTimeout`, `idleTimeout`, `bodyReadTimeout`; hyper has none). They are off by default.
 
 The full table is SPEC §3.9.
 
