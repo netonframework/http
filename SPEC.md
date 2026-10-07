@@ -869,3 +869,16 @@ TimeoutCoroutine、Job 收尾、计时器与时钟读取）。改由本配置实
 时服务延迟 400 ms（超过时限）再读也不超时；分段到达但在时限内正常读完；keep-alive 上每个请求各自计时；无读超时能力的流被拒绝；0 关闭。
 全量：macOS 内存与 TCP 传输各 1239（15 跳过）；Linux arm64（Colima）io_uring 与 epoll 各 1225 通过。HTTP/2 不在本项范围（仍由适配器计时）。
 
+### HTTP/1 平滑关闭漏掉"经由监视等待下一个请求"的空闲连接（2026-10-07，缺陷，已修复）
+
+服务挂起过（启动了读方向的监视）的连接，在响应写完后经 `awaitIdleRead` 用监视那次挂起的读等下一个请求。此时调用
+`gracefulShutdown()`：`waitingForHead` 为假，流不被关闭，监视的读不被唤醒，`serve()` 永不结束（hyper：空闲连接立即关闭）。
+修复：`awaitIdleRead` 期间同样置 `waitingForHead`（它只用于让平滑关闭关闭流、唤醒挂起的读），监视见 `closing` 后退出。
+测试 `nativeTest/h1/IdleWatchShutdownTest`（2 个，TCP）：修复前 GET 的一例 5 s 超时，修复后两例通过。
+全量：macOS 内存与 TCP 传输各 1241（15 跳过）；153 Linux x64 epoll 与 io_uring 各 1227 通过。
+
+另记：为修"背压中的响应写入不随客户端关闭而取消"（DeferredWatchTest 中跳过的一例）试过"写入挂起即启动监视"：io_uring
+的写入总经提交队列、对调用方总是挂起，于是每个响应都启动监视（等于撤销断连监视的优化），并因上面这个缺陷使
+`HyperServerTest.disableKeepAlivePostRequest` 在 io_uring 下稳定超时。已撤回；该缺陷另行设计（写入挂起在就绪型驱动上意味着
+缓冲区已满，在 io_uring 上不意味着）。
+

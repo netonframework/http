@@ -225,7 +225,11 @@ class Http1Connection internal constructor(
                 watch = null
                 // hyper `is_done`: a connection that will not read another head ends now instead of waiting for the peer.
                 if (!w.isCompleted && !conn.canReadHead) { w.cancel(); return }
-                if (!w.isCompleted) awaitIdleRead(w)
+                if (!w.isCompleted) {
+                    // Waiting for the next head through the watch's read: a graceful shutdown must wake it too.
+                    waitingForHead = true
+                    try { awaitIdleRead(w) } finally { waitingForHead = false }
+                }
                 watchError?.let { throw it }
             }
             if (!conn.canReadHead) return
