@@ -43,6 +43,43 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
     /** One writer at a time: the connection and, for `100 Continue`, a request body read elsewhere. */
     val writeLock = WriteGate()
 
+    /**
+     * Server only: called when a flush's write does not complete at once after the response has put more than
+     * [WATCH_WRITES_AFTER] bytes on the wire. The server then watches the read side, so a client that goes away cancels
+     * the parked write (it runs in [writeContext]) instead of leaving it parked (hyper polls the read side while a write
+     * is pending). Smaller responses fit in the socket buffers and cannot be held up by backpressure on their own; they
+     * keep the plain write (on io_uring every write is pending until its completion is reaped, so "pending" alone says
+     * nothing). null: plain writes always.
+     */
+    var onWritePending: (() -> Unit)? = null
+
+    /** Bytes the current response has flushed (the server resets it per exchange). */
+    var messageBytes = 0L
+
+    // The writes as calls that report whether they completed at once; nothing is allocated when they do.
+    @PublishedApi internal val headCall = InlineCall<H1Io, Int>(H1Io::writeHead)
+    @PublishedApi internal val segmentsCall = InlineCall<H1Io, Long>(H1Io::writeSegments)
+
+    /** The context a watched write runs in (the exchange's, so cancelling the exchange cancels the write). */
+    var writeContext: kotlin.coroutines.CoroutineContext
+        get() = headCall.context
+        set(value) { headCall.context = value; segmentsCall.context = value }
+
+    // Tail calls only: no continuation of their own.
+    @PublishedApi internal suspend fun writeHead(): Int = stream.write(head)
+    @PublishedApi internal suspend fun writeSegments(): Long = stream.writev(segments, segmentCount)
+
+    /** The watched write: as [flush]'s, but cancellable through [writeContext] and reported to [onWritePending]. */
+    @PublishedApi internal suspend fun watchedWrite(pending: () -> Unit) {
+        if (segmentCount == 0) {
+            if (head.readableBytes > 0 && headCall.start(this) === kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED) {
+                pending(); headCall.await()
+            }
+        } else if (segmentsCall.start(this) === kotlin.coroutines.intrinsics.COROUTINE_SUSPENDED) {
+            pending(); segmentsCall.await()
+        }
+    }
+
     /** Bytes waiting to be written. */
     val buffered: Long get() = head.readableBytes + queuedBytes + framingBytes()
 
@@ -104,6 +141,16 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
     @Suppress("NOTHING_TO_INLINE")
     suspend inline fun flush() {
         if (flushPipeline && readBuf.readableBytes > 0) return
+        val pending = onWritePending
+        if (pending != null) {
+            messageBytes += head.readableBytes + queuedBytes     // chunk framing (a few bytes) left out: no loop per flush
+            if (messageBytes > WATCH_WRITES_AFTER) {
+                watchedWrite(pending)
+                resetWrite()
+                stream.flush()
+                return
+            }
+        }
         if (segmentCount == 0) {
             if (head.readableBytes > 0) stream.write(head)
         } else {
@@ -153,6 +200,9 @@ internal class H1Io(val stream: IoStream, val maxBufSize: Int = DEFAULT_MAX_BUFF
         const val INIT_BUFFER_SIZE = 8192
         const val MINIMUM_MAX_BUFFER_SIZE = INIT_BUFFER_SIZE
         const val DEFAULT_MAX_BUFFER_SIZE = 8192 + 4096 * 100
+
+        /** A response beyond this many bytes may be held up by backpressure: its writes are watched (onWritePending). */
+        const val WATCH_WRITES_AFTER = 64L * 1024
         const val MAX_BUF_LIST_BUFFERS = 16
         /** Body data smaller than this is copied into the write buffer; larger data is queued by reference. */
         const val QUEUE_MIN_BYTES = 1024

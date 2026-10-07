@@ -108,18 +108,22 @@ class DeferredWatchTest {
         client.close()
     }
 
-    // Known defect, not caused by the deferred watch (fails the same way without it): a response write parked on
-    // socket backpressure runs in the connection's own coroutine, outside exchangeJob, and nothing watches the read
-    // side while it waits, so a client that closes is not noticed until the write completes. SPEC 11 (deferred
-    // watch record) tracks the fix; hyper ends such an exchange with an incomplete-message error.
-    @kotlin.test.Ignore
+    /** A large response (1 MiB) whose writes are watched (beyond Http1 WATCH_WRITES_AFTER). */
+    private fun largeResponse(): Response<Body> = Response(FullBody(Bytes.copyOf(ByteArray(1 shl 20))))
+
+    /** A response write parked on backpressure is cancelled when the client goes away (hyper: incomplete message). */
     @Test
     fun suspendedResponseWriteStillObservesEof() = runReactor {
         val (raw, client) = memoryStreamPair()
         val writing = CompletableDeferred<Unit>()
         val cancelled = CompletableDeferred<Unit>()
         val server = object : IoStream by raw {
+            // The peer never takes anything: every write parks until cancelled.
             override suspend fun write(src: Buffer): Int {
+                writing.complete(Unit)
+                try { awaitCancellation() } finally { cancelled.complete(Unit) }
+            }
+            override suspend fun writev(bufs: Array<Buffer>, count: Int): Long {
                 writing.complete(Unit)
                 try { awaitCancellation() } finally { cancelled.complete(Unit) }
             }
@@ -129,13 +133,34 @@ class DeferredWatchTest {
             runCatching {
                 config.serveConnection(server) { req ->
                     while (req.body.nextFrame() != null) { }
-                    response()
+                    largeResponse()
                 }.serve()
             }
         }
         withTimeout(5_000) { writing.await() }
         client.shutdownOutput()
         withTimeout(5_000) { cancelled.await() }
+        val error = withTimeout(5_000) { done.await() }.exceptionOrNull()
+        assertTrue(error is HttpError && error.isIncompleteMessage(), "$error")
+        client.close()
+    }
+
+    /** The same with real backpressure: a 16 KiB stream the client never reads from, then the client half-closes. */
+    @Test
+    fun responseWriteBlockedByAPeerThatStopsReadingEndsWhenItCloses() = runReactor {
+        val (server, client) = memoryStreamPair(16 * 1024)
+        client.send(requests.first())
+        val done = async {
+            runCatching {
+                config.serveConnection(server) { req ->
+                    while (req.body.nextFrame() != null) { }
+                    largeResponse()
+                }.serve()
+            }
+        }
+        kotlinx.coroutines.delay(50)                         // the response fills the stream and its write parks
+        assertTrue(!done.isCompleted, "the write must be parked on backpressure")
+        client.shutdownOutput()
         val error = withTimeout(5_000) { done.await() }.exceptionOrNull()
         assertTrue(error is HttpError && error.isIncompleteMessage(), "$error")
         client.close()

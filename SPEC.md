@@ -882,3 +882,20 @@ TimeoutCoroutine、Job 收尾、计时器与时钟读取）。改由本配置实
 `HyperServerTest.disableKeepAlivePostRequest` 在 io_uring 下稳定超时。已撤回；该缺陷另行设计（写入挂起在就绪型驱动上意味着
 缓冲区已满，在 io_uring 上不意味着）。
 
+### HTTP/1 背压中的响应写入随客户端关闭而结束（2026-10-07，缺陷，已修复）
+
+缺陷：客户端不再读取且半关闭时，服务端卡在响应写入上的交换永不结束（写在连接自己的协程里、不受 `exchangeJob` 取消，写挂起时也
+没有监视读方向）；hyper 在写挂起时轮询读方向，见 EOF 即以 incomplete message 结束。
+
+设计：只有本次响应已写出超过 `H1Io.WATCH_WRITES_AFTER`（64 KiB）后，flush 才改用"受监视的写"：写经 `InlineCall` 发起、运行在
+交换的上下文中，未能当场完成就启动读方向监视；监视见 EOF 取消 `exchangeJob`，挂起的写随之取消，交换以 IncompleteMessage
+结束。更小的响应装得进 socket 缓冲区（发送缓冲加对端接收窗口），不会单独被背压卡住，保持原来的直接写——这也避开了 io_uring
+上"每次写都挂起"导致每个响应都启动监视的问题（上一节否决的方案）。
+
+测试（`nativeTest/h1/DeferredWatchTest`）：原跳过的一例改为 1 MiB 响应、`write` 与 `writev` 都永不完成的流，客户端半关闭后写被
+取消、错误为 IncompleteMessage；另加真实背压一例（16 KiB 内存流、客户端不读后半关闭）。去掉接线时两例都 5 s 超时（反向对照）。
+全量：macOS 内存与 TCP 传输各 1242（14 跳过，均为参考实现本身跳过的用例）；153 Linux x64 epoll 与 io_uring 各 1229 通过。
+
+代价（153，cachegrind，hello，每轮两次）：修改前 11,286 / 11,274，修改后 11,323 / 11,366 条指令每请求（约 +60，0.5%）；类浏览器
+请求 25,351 / 25,296 对 25,277 / 25,373（无差别）。
+

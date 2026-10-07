@@ -189,6 +189,8 @@ class Http1Connection internal constructor(
         val callContext = coroutineContext + exchangeJob
         serviceCall.context = callContext
         frameCall.context = callContext
+        io.writeContext = callContext
+        io.onWritePending = onPending
         var upgraded = false
         try {
             loop()
@@ -316,6 +318,7 @@ class Http1Connection internal constructor(
     @Suppress("UNCHECKED_CAST")
     private suspend fun exchange(request: Request<Incoming>) {
         inFlight = true
+        io.messageBytes = 0
         try {
             call.request = request
             val response = try {
@@ -332,7 +335,12 @@ class Http1Connection internal constructor(
                 if (conn.canWriteHead && e.isBodyTooLarge()) { rejectBodyTooLarge(); throw conn.error!! }
                 throw if (e is HttpError) e else HttpError(HttpError.Kind.UserService, e)
             }
-            writeResponse(response)
+            try {
+                writeResponse(response)
+            } catch (e: CancellationException) {
+                // A watched write cancelled by the read-side watch: the client went away (hyper: incomplete message).
+                throw watchError ?: e
+            }
         } finally {
             inFlight = false
         }
