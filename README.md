@@ -22,6 +22,7 @@ targets only (Linux, macOS, iOS, Android native, Windows mingw).
 | Upgrades, CONNECT and extended CONNECT tunnels | done |
 | HTTP/3 | in the separate repository [http3](https://github.com/netonframework/http3) (`com.netonstream:http3`, `neton.http.h3`) |
 | HTTP/1 or HTTP/2 on one port (hyper-util `server::conn::auto`) | done; hyper-util's tests ported; ALPN input added |
+| Pooling client (hyper-util `client::legacy::Client`) | done: per-host pool, idle timeout, max idle per host, HTTP/2 sharing, pluggable `Connector` |
 | Connection pooling and the rest of hyper-util | out of scope for this version |
 
 ## Conformance and tests
@@ -81,6 +82,16 @@ runReactor {
 
 HTTP/2 client: `neton.http.h2.http2Handshake(stream)` with an absolute URI. `SendRequest.clone()` gives one sender per
 concurrent stream.
+
+Pooling client (hyper-util `client::legacy::Client`): connections per `scheme://authority`, reused and closed when idle.
+
+```kotlin
+val client = neton.http.client.Client.builder().build(this) // its connections run in this scope
+val response = client.get("http://example.com/")              // HTTP/1 over TCP; read the body to its end to reuse
+```
+
+HTTPS needs a `Connector` that adds TLS (this library has none) and reports ALPN `h2`; `http2Only(true)` speaks HTTP/2
+with prior knowledge.
 
 HTTP/3: see the [http3](https://github.com/netonframework/http3) repository.
 

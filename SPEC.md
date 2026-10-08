@@ -925,3 +925,22 @@ TimeoutCoroutine、Job 收尾、计时器与时钟读取）。改由本配置实
 发 3 字节后停止 → 408，同一连接上的下一个请求照常；请求体已随请求到达而服务先等 400 ms 再读不超时；分段在时限内到达照常读完；非正时长被拒绝。
 全量 macOS 1236 通过、14 跳过（此前 1228 + 新增 8）；153（Linux x64）io_uring 全量 1237 通过，epoll 下本组 8 个通过。
 
+### 连接池客户端（2026-10-08，复刻 hyper-util 0.1.20 `client::legacy`）
+- `neton.http.client.Client`（`Client::request` / `get`）与 `ClientBuilder`（`poolIdleTimeout` 默认 90 s、`poolMaxIdlePerHost` 默认不限、
+  `retryCanceledRequests` 默认开、`setHost` 默认开、`http2Only`、HTTP/1 与 HTTP/2 连接选项）；`Connector`（hyper-util `Connect`）、`Connected`
+  （带 ALPN 是否协商出 h2）、`HttpConnector`（TCP，默认只接受 `http`，可设连接超时）。本库没有 TLS：HTTPS 由提供 TLS 的 Connector 实现。
+- 池（hyper-util `pool::Pool`）：按 `scheme://authority` 分组；HTTP/1 空闲连接后进先出，响应体读完、连接重新就绪后放回；HTTP/2 每个 key 一个共享
+  连接，每个请求用 `clone()` 出的句柄、拿到响应头后释放（流结束前连接不关）；`http2Only` 时同一 key 只发起一个连接（hyper-util 的
+  `connecting` 锁）。空闲超时在取用时与后台回收任务中检查（任务只在池里有连接时运行）。
+- HTTP/1 请求：补 `Host`（非默认端口带端口）、URI 改为 origin 形式（CONNECT 用 authority 形式），与 hyper-util `send_request` 相同。
+- 重试：只在从池中取出的连接发送前已关闭（服务端结束了 keep-alive）时换新连接，什么都没写出过；写出过的请求从不重发（hyper-util 的
+  `retry_canceled_requests` 也只重试未开始的请求）。
+- ⚖️ 与 hyper-util 的差异：hyper-util 在没有空闲连接时让新建连接与池的取用赛跑；本库在没有空闲连接但该 key 有借出的 HTTP/1 连接时，先让出
+  至多 4 次反应器（刚读完响应体的连接在两三次调度内回到池中），避免读完响应后立即发出的下一个请求另开连接。客户端在构建时给定的作用域
+  （反应器线程）上使用（hyper-util 取执行器）。
+- 实现中发现的自身缺陷：新建的 HTTP/1 连接在 `run()` 开始前 `isReady` 为假，早期版本据此把新连接当作已关闭而重连，循环中占满了本机临时端口；
+  改为只对池中取出的连接检查，新建 HTTP/2 连接若立即关闭则报错而不重连。
+- 测试 `ClientPoolTest`（回环 TCP，本库的 HTTP/1、HTTP/2 服务端）：顺序请求共用一个连接并带正确的 Host 与 origin 形式；并发请求各开连接、
+  之后全部回池并被复用；每主机空闲上限；空闲超时；服务端关闭的空闲连接被透明替换；HTTP/2 并发 10 个请求共用一个连接；不同 authority
+  分开；相对 URI 与 https（无 TLS 连接器）被拒绝。macOS 全量 1,259 个（14 个跳过）通过。
+
