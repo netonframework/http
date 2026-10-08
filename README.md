@@ -11,7 +11,8 @@ measurements: [SPEC.md](SPEC.md).
 
 ## Status
 
-Release coordinate: `com.netonstream:http:0.1.2`, built against `com.netonstream:io:0.3.0`. Kotlin 2.4.0, native
+Release coordinate: `com.netonstream:http:0.2.0`, built against `com.netonstream:io:0.3.2`. 0.2.0 adds the pooling
+client (`neton.http.client`) and HTTP/2 server handshake, idle and body-read timeouts. Kotlin 2.4.0, native
 targets only (Linux, macOS, iOS, Android native, Windows mingw).
 
 | Area | State |
