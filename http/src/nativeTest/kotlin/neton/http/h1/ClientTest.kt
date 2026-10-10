@@ -93,6 +93,43 @@ class ClientTest {
         b.close()
     }
 
+    /** hyper: a response body dropped before its end (and not all buffered) stops reading; the connection closes. */
+    @Test
+    fun aResponseBodyDroppedUnreadClosesTheConnection() = runReactor {
+        val (a, b) = testStreamPair()
+        val (sender, connection) = http1Handshake(a)
+        val run = async { runCatching { connection.run() } }
+        val res = async { sender.sendRequest(get("/")) }
+        b.readUntil("\r\n\r\n")
+        b.send("HTTP/1.1 200 OK\r\ncontent-length: 1000000\r\n\r\nfirst")
+        val body = withTimeout(5_000) { res.await() }.body
+        assertEquals("first", (body.nextFrame() as Frame.Data).bytes.toByteArray().decodeToString())
+        body.close()
+        assertTrue(withTimeout(5_000) { run.await() }.isSuccess)
+        assertTrue(sender.isClosed)
+        assertEquals(-1, withTimeout(5_000) { b.read(Buffer()) }, "the server sees the connection end")
+    }
+
+    /** A dropped body whose rest is already buffered is drained, and the connection carries the next request. */
+    @Test
+    fun aResponseBodyDroppedWithItsRestBufferedIsDrained() = runReactor {
+        val (a, b) = testStreamPair()
+        val (sender, connection) = http1Handshake(a)
+        val run = launch { connection.run() }
+        val res = async { sender.sendRequest(get("/1")) }
+        b.readUntil("\r\n\r\n")
+        b.send("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello")
+        val r = withTimeout(5_000) { res.await() }
+        r.body.close()
+        withTimeout(5_000) { sender.ready() }
+        val res2 = async { sender.sendRequest(get("/2")) }
+        assertEquals("GET /2 HTTP/1.1\r\n\r\n", b.readUntil("\r\n\r\n"))
+        b.send("HTTP/1.1 204 No Content\r\n\r\n")
+        assertEquals(StatusCode.NO_CONTENT, withTimeout(5_000) { res2.await() }.status)
+        b.close()
+        withTimeout(5_000) { run.join() }
+    }
+
     @Test
     fun serverClosingMidResponseIsIncomplete() = runReactor {
         val (a, b) = testStreamPair()

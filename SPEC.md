@@ -944,3 +944,14 @@ TimeoutCoroutine、Job 收尾、计时器与时钟读取）。改由本配置实
   之后全部回池并被复用；每主机空闲上限；空闲超时；服务端关闭的空闲连接被透明替换；HTTP/2 并发 10 个请求共用一个连接；不同 authority
   分开；相对 URI 与 https（无 TLS 连接器）被拒绝。macOS 全量 1,259 个（14 个跳过）通过。
 
+
+### HTTP/1 客户端丢弃未读完的响应体时连接既不复用也不关闭（2026-10-11，缺陷，已修复）
+- 现象：tls 仓库的跨层组合测试（HTTPS 经 TLS、TCP 与反应器）中，客户端读了无限响应体的前几帧后 `Incoming.close()`，服务端连接
+  一直不结束（服务端被背压卡在写上，直到客户端整体关闭）。原因：`H1Conn` 没有实现 `Incoming.Source.close(generation)`（默认空操作），
+  客户端连接的 `exchange` 一直等待响应体结束。
+- 修复（与 hyper 一致：dispatcher 发现响应体接收端被丢弃时调用 `poll_drain_or_close_read`）：`H1Conn.close(generation)` 对当前仍可读的
+  响应体调用 `onBodyDropped`；客户端随即 `drainOrCloseRead()`——已缓冲的部分能让响应体结束则连接照常复用，否则停止读取、连接关闭。
+  服务端仍在交换结束时处理未读的请求体（不变）。
+- 测试：`ClientTest.aResponseBodyDroppedUnreadClosesTheConnection`（剩余部分未到：连接结束、对端读到 EOF）、
+  `aResponseBodyDroppedWithItsRestBufferedIsDrained`（剩余部分已缓冲：连接承载下一个请求）；去掉客户端的接线时两项都超时失败。
+  macOS arm64 全量 1261 个测试通过；tls-http 组合测试以 `--include-build ../http` 验证 HTTP/1 丢弃后服务端连接结束。

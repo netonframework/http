@@ -111,6 +111,9 @@ class Http1ClientConnection internal constructor(private val stream: IoStream, p
     init {
         io.queueStrategy = config.writev ?: true
         conn.onBodyDone = { if (awaitingBody) bodyDone.raise() }
+        // hyper: a response body dropped before its end is drained from what is buffered, else reading stops and the
+        // connection closes (it cannot carry another request, and the server must not be left writing into it).
+        conn.onBodyDropped = { if (awaitingBody) { conn.drainOrCloseRead(); bodyDone.raise() } }
     }
 
     internal val isReady: Boolean get() = !closed && idle && pending == null

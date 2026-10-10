@@ -6,7 +6,9 @@ package neton.http
  * intermediate buffer and no data is read before it is asked for (backpressure, as hyper's body channel).
  *
  * [close] drops the body (hyper drops an `Incoming`): an HTTP/2 body not read to its end releases its stream then
- * (the peer may be told to stop sending). An HTTP/1 body needs no closing (the connection handles an unread body).
+ * (the peer may be told to stop sending). An HTTP/1 response body closed before its end is drained from what is
+ * already buffered, or else its connection is closed (it can carry no other request); the server handles an unread
+ * request body when the exchange ends.
  */
 class Incoming internal constructor(private val source: Source?, private val generation: Int, private val declaredLength: Long) : Body, AutoCloseable {
 

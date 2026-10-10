@@ -375,6 +375,16 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
     /** Called when the body being read has ended (the server starts watching for EOF then). */
     var onBodyDone: () -> Unit = {}
 
+    /**
+     * Called when the reader drops the body being read before its end ([Incoming.close]; hyper's dispatcher sees the
+     * body receiver gone). The client drains or closes then; the server does so when the exchange ends.
+     */
+    var onBodyDropped: () -> Unit = {}
+
+    override fun close(generation: Int) {
+        if (generation == bodyGeneration && canReadBody) onBodyDropped()
+    }
+
     private var bodyError: HttpError? = null
 
     /** Monotonic ms by which the body being read must end (Http1ServerConfig.bodyReadTimeoutMillis); 0: not armed. */
