@@ -2,7 +2,8 @@ name: CI
 
 # The whole suite on every platform GitHub hosts: macOS (kqueue), Linux x64 (epoll, io_uring), Windows (IOCP,
 # WSAPoll), each over in-memory stream pairs and, on Linux epoll, over loopback TCP as well
-# (NETON_HTTP_TEST_TRANSPORT=tcp, SPEC §6); every target compiled. Any branch, PRs, or by hand.
+# (NETON_HTTP_TEST_TRANSPORT=tcp, SPEC §6); every target compiled; and the external checks on Linux with both drivers:
+# h2spec 2.1.1 and curl interop (HTTP/1.x and h2c). Any branch, PRs, or by hand.
 on:
   push:
   pull_request:
@@ -84,3 +85,62 @@ jobs:
           :http:compileKotlinMingwX64 :http:compileKotlinIosArm64 :http:compileKotlinIosSimulatorArm64 :http:compileKotlinIosX64
           :http:compileKotlinAndroidNativeArm64 :http:compileKotlinAndroidNativeArm32 :http:compileKotlinAndroidNativeX64
           :http:compileKotlinAndroidNativeX86 :http:compileNativeMainKotlinMetadata
+
+  conformance:
+    # External conformance (SPEC §6): h2spec 2.1.1 (pinned by SHA-256; it targets RFC 7540 / 7541) against the HTTP/2
+    # echo server, and curl interop over HTTP/1.x and h2c (http-bench/curl-interop.sh). Fails on any failure.
+    name: h2spec and curl (${{ matrix.driver }})
+    strategy:
+      fail-fast: false
+      matrix:
+        driver: [epoll, iouring]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NETON_IO_DRIVER: ${{ matrix.driver }}
+      H2SPEC_URL: https://github.com/summerwind/h2spec/releases/download/v2.1.1/h2spec_linux_amd64.tar.gz
+      H2SPEC_SHA256: 12ab6fa40cd7eff75b943cca5cdc20ae58b105252007909eeadd2e4d5efb24d3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('**/*.gradle.kts', 'gradle/libs.versions.toml') }}
+      - name: Link the echo server
+        run: ./gradlew :http-bench:linkEchoServerReleaseExecutableLinuxX64 --no-daemon --stacktrace
+      - name: h2spec
+        run: |
+          curl -sSL -o h2spec.tgz "$H2SPEC_URL"
+          echo "$H2SPEC_SHA256  h2spec.tgz" | sha256sum -c -
+          tar xzf h2spec.tgz h2spec
+          curl --version | head -1 | tee -a "$GITHUB_STEP_SUMMARY"
+          ./http-bench/h2spec.sh "$PWD/http-bench/build/bin/linuxX64/echoServerReleaseExecutable/echoServer.kexe" "$PWD/h2spec" 3102 h2spec-report.xml | tee h2spec.txt
+          exit ${PIPESTATUS[0]}
+      - name: curl interop, HTTP/1.x
+        if: always()
+        run: ./http-bench/curl-interop.sh "$PWD/http-bench/build/bin/linuxX64/echoServerReleaseExecutable/echoServer.kexe" 3103 | tee curl-h1.txt; exit ${PIPESTATUS[0]}
+      - name: curl interop, h2c
+        if: always()
+        run: H2=1 ./http-bench/curl-interop.sh "$PWD/http-bench/build/bin/linuxX64/echoServerReleaseExecutable/echoServer.kexe" 3104 | tee curl-h2.txt; exit ${PIPESTATUS[0]}
+      - name: Summary
+        if: always()
+        run: |
+          { echo "### h2spec and curl (${{ matrix.driver }})"; echo '```'; grep -E "tests, .* passed|^passed " h2spec.txt curl-h1.txt curl-h2.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-${{ matrix.driver }}
+          path: |
+            h2spec.txt
+            h2spec-report.xml
+            h2spec-server.log
+            curl-h1.txt
+            curl-h2.txt
+          if-no-files-found: ignore
+
