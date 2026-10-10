@@ -452,6 +452,39 @@ class RoleTest {
         }
     }
 
+    /** ⚖️ chunked applied more than once, in one list or across lines (hyper decodes once; Go, Node.js refuse; SPEC §6). */
+    @Test
+    fun chunkedMoreThanOnceIsRejected() {
+        for (raw in listOf(
+            "POST / HTTP/1.1\r\ntransfer-encoding: chunked, chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\ntransfer-encoding: chunked\r\ntransfer-encoding: chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\ntransfer-encoding: chunked, gzip, chunked\r\n\r\n",
+            "POST / HTTP/1.1\r\ntransfer-encoding: CHUNKED\r\ntransfer-encoding: gzip, Chunked\r\n\r\n",
+        )) {
+            val e = serverParseErr(raw)
+            assertEquals(H1ParseError.TransferEncodingInvalid, e, raw)
+            assertEquals(400, e.autoStatus)
+        }
+        // Once, last, with other codings before it: still fine.
+        assertEquals(BodyLength.CHUNKED, serverParse("POST / HTTP/1.1\r\ntransfer-encoding: gzip, chunked\r\n\r\n").decode)
+    }
+
+    /** ⚖️ RFC 9112 §3.2: several Host lines are refused; a missing one only with requireHost (hyper accepts both). */
+    @Test
+    fun hostRules() {
+        for (raw in listOf(
+            "GET / HTTP/1.1\r\nhost: a\r\nhost: b\r\n\r\n",
+            "GET / HTTP/1.1\r\nhost: a\r\nhost: a\r\n\r\n",
+            "GET / HTTP/1.0\r\nhost: a\r\nhost: b\r\n\r\n",
+        )) assertEquals(H1ParseError.Host, serverParseErr(raw), raw)
+        assertEquals(0L, serverParse("GET / HTTP/1.1\r\n\r\n").decode)
+        val strict = H1Config(requireHost = true)
+        assertEquals(H1ParseError.Host, serverParseErr("GET / HTTP/1.1\r\n\r\n", config = strict))
+        assertEquals(400, H1ParseError.Host.autoStatus)
+        serverParse("GET / HTTP/1.1\r\nhost: a\r\n\r\n", strict)
+        serverParse("GET / HTTP/1.0\r\n\r\n", strict)                // HTTP/1.0 needs none
+    }
+
     @Test
     fun requestLineAndHeadLimits() {
         // ⚖️ request line > 8 KiB → 414, complete or not.

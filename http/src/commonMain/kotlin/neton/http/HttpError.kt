@@ -19,6 +19,8 @@ class HttpError(val kind: Kind, cause: Throwable? = null) : Exception(describe(k
         ParseHeaderTransferEncodingUnexpected("unexpected transfer-encoding parsed"),
         /** ⚖️ Transfer-Encoding with Content-Length (SPEC §3.9); hyper has no such error. */
         ParseHeaderTransferEncodingWithContentLength("transfer-encoding with content-length parsed"),
+        /** ⚖️ A request with more than one Host, or (with `requireHost`) an HTTP/1.1 request without one (RFC 9112 §3.2). */
+        ParseHeaderHost("missing or duplicate host header"),
         ParseTooLarge("message head is too large"),
         ParseStatus("invalid HTTP status-code parsed"),
         ParseInternal("internal error inside the HTTP library, please report"),

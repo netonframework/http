@@ -35,6 +35,8 @@ enum class H1ParseError(val autoStatus: Int) {
     HeaderToken(400), ContentLengthInvalid(400), TransferEncodingInvalid(400), TransferEncodingUnexpected(400),
     /** ⚖️ Transfer-Encoding together with Content-Length (request smuggling vector, SPEC §3.9). */
     TransferEncodingWithContentLength(400),
+    /** ⚖️ A request with more than one Host, or (with requireHost) an HTTP/1.1 request without one (RFC 9112 §3.2). */
+    Host(400),
     TooLarge(431), Status(0), Internal(0);
 
     companion object {
@@ -59,6 +61,8 @@ class H1Config(
     val maxRequestLineSize: Int = 8 * 1024,
     /** ⚖️ false: TE + CL in a request → 400 and close; true: hyper's behaviour (drop CL, process TE, close after). */
     val lenientTeWithCl: Boolean = false,
+    /** ⚖️ Server: an HTTP/1.1 request without Host is refused with 400 (RFC 9112 §3.2); several are refused always. */
+    val requireHost: Boolean = false,
     val titleCaseHeaders: Boolean = false,
     /** Record the original case of header names in a [HeaderCaseMap] extension, and write it back (hyper `preserve_header_case`). */
     val preserveHeaderCase: Boolean = false,
@@ -162,6 +166,19 @@ internal object H1Headers {
         return false
     }
 
+    /** How many tokens of the comma list are `chunked`. */
+    fun chunkedCount(v: HeaderValue): Int {
+        var n = 0
+        var s = v.offset; val end = v.offset + v.length
+        while (s <= end) {
+            var e = s
+            while (e < end && v.array[e] != ','.code.toByte()) e++
+            if (tokenEquals(v.array, s, e, "chunked")) n++
+            s = e + 1
+        }
+        return n
+    }
+
     /** The last token of the comma list is `chunked` (hyper `is_chunked_`). */
     fun isChunked(v: HeaderValue): Boolean {
         if (v.tryToStr() == null) return false
@@ -244,6 +261,7 @@ class ServerHeadParser(val config: H1Config = H1Config()) {
         var expectContinue = false
         var conLen: Long? = null
         var isCl = false; var isTe = false; var isTeChunked = false
+        var chunkedCodings = 0; var hosts = 0
         var wantsUpgrade = method === Method.CONNECT
         val headers = HeaderMap<HeaderValue>()
         if (slots.count > 0) headers.reserve(slots.count)
@@ -259,7 +277,12 @@ class ServerHeadParser(val config: H1Config = H1Config()) {
                     isTe = true
                     if (isCl && conLen != null) { conLen = null; headers.remove(HeaderName.CONTENT_LENGTH) }
                     if (H1Headers.isChunked(value)) { isTeChunked = true; decoder = BodyLength.CHUNKED } else isTeChunked = false
+                    // ⚖️ chunked applied more than once (a sender MUST NOT, RFC 9112 §7; the TE.TE smuggling form): hyper
+                    // decodes it once, Go and Node.js refuse it (SPEC §6, the HTTP/1 differential).
+                    chunkedCodings += H1Headers.chunkedCount(value)
+                    if (chunkedCodings > 1) return fail(H1ParseError.TransferEncodingInvalid)
                 }
+                name === HeaderName.HOST -> hosts++
                 name === HeaderName.CONTENT_LENGTH -> {
                     isCl = true
                     if (isTe) continue
@@ -279,6 +302,9 @@ class ServerHeadParser(val config: H1Config = H1Config()) {
             headers.append(name, value)
         }
         if (isTe && !isTeChunked) return fail(H1ParseError.TransferEncodingInvalid)
+        // ⚖️ Several Host lines are always refused (a proxy and an origin may each take a different one); a missing Host
+        // only with requireHost (hyper accepts it, and its tests and low-level client send none).
+        if (hosts > 1 || (hosts == 0 && isHttp11 && config.requireHost)) return fail(H1ParseError.Host)
         if (isTe && isCl) {
             if (!config.lenientTeWithCl) return fail(H1ParseError.TransferEncodingWithContentLength)
             keepAlive = false

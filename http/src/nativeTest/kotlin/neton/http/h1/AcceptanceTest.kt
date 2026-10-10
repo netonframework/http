@@ -175,6 +175,14 @@ class AcceptanceTest {
     @Test
     fun whitespaceBeforeColonIsRejected() = assertRejected("400", "GET / HTTP/1.1\r\nContent-Length : 5\r\n\r\nGET /")
 
+    /** ⚖️ Found by the HTTP/1 differential (SPEC §6): hyper accepts both. */
+    @Test
+    fun chunkedTwiceIsRejected() =
+        assertRejected("400", "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+
+    @Test
+    fun twoHostsAreRejected() = assertRejected("400", "GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n")
+
     @Test
     fun overlongRequestLineIsRejected() = assertRejected("414", "GET /" + "a".repeat(9 * 1024) + " HTTP/1.1\r\n\r\n")
 

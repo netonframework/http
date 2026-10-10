@@ -260,6 +260,8 @@ com.netonstream:io（IoStream / Framed / Buffer / Bytes / 反应器 / 准入 / �
 | CL 逗号列表（请求） | 拒绝 | 值不同则拒绝 | 拒绝（hyper 更严） |
 | CL 溢出 | 400（`checked_mul` 失败 → `ContentLengthInvalid`） | 400 / 413 | 400（hyper；原表误记为 431，端到端测试更正） |
 | 单独的 LF 行结束 | 接受（httparse） | 拒绝 | **拒绝**；`allowBareLf` |
+| chunked 出现多次（TE.TE） | 接受，只解一次 | — （2026-10-11 增补） | **400 并关闭**（Go 501、Node 400；差分测试发现） |
+| Host 多个 / 缺少（HTTP/1.1） | 都接受 | — （2026-10-11 增补） | 多个 **400**；缺少默认接受（hyper），`requireHost` 时 400（RFC 9112 §3.2） |
 | 单独的 CR、obs-fold（请求）、冒号前空白 | 拒绝 | 拒绝 | 拒绝 |
 | 请求行 | 65534 | 8 KiB | **8 KiB**（可配置） |
 | 头部段 | 约 400 KB（缓冲上限） | 64 KiB | **64 KiB**（`maxHeaderSectionSize`） |
@@ -968,4 +970,26 @@ TimeoutCoroutine、Job 收尾、计时器与时钟读取）。改由本配置实
   分段发 1200 字节 → 413，连接继续；恰好 1000 字节照常读完；0 不限（20000 字节）；默认 10 MiB、负数被拒。同时去掉"声明超限"判断与
   "服务因超限失败 → 413"分支时，前两项分别失败（服务等待不会到来的请求体而超时；流被以 INTERNAL_ERROR 复位）。macOS 全量 1266 个
   通过、14 个跳过。
+
+### HTTP/1 解析差分测试（2026-10-11）
+- **做法**：`http-bench/differential`：同一批 50 个歧义请求（CL / TE 的各种组合与写法、chunk 帧格式、行结束、头部语法、请求行、Host），
+  原样经 TCP 发给本库的 `echoServer` 与三个参考服务端——hyper 1.11.1（本库 HTTP/1 的复刻对象，`Cargo.lock` 固定）、Go net/http、Node.js
+  （llhttp，默认严格设置）；每个服务端对每个请求回应它理解到的"方法 目标 长度 校验和"。每个用例之后在同一连接上紧跟一个哨兵请求
+  `GET /sentinel`，被当作新请求的残余字节会表现为多出或变形的请求。判定（对每个参考分别比较本库解析出的请求序列）：相同；本库更严
+  （拒绝而参考接受，安全基线允许）；本库更宽（所有参考都拒绝而本库接受）→ 失败；双方都接受但请求序列不同（走私隐患）→ 失败；本库既
+  不应答也不关闭连接 → 失败。`EXPECTED` 记录经审查接受的差异（目前为空）。CI 的 conformance 作业在 epoll 与 io_uring 上运行。
+- **结果**（macOS 本地；加固前）：50 个用例 × 3 个参考，相同 127、本库更严 11、本库比某个参考宽 12（每次都有另一个参考与本库一致地接受），
+  无失败。本库与 hyper 只在安全基线规定的项目上不同（TE 与 CL 同时出现、单独的 LF）。分块格式错误时本库与 hyper 一样直接关闭连接（不
+  挂起），Go 与 Node 回 400。
+- **据此加固** ⚖️（hyper 均接受）：
+  1. `chunked` 在全部 TE 行中合计出现多于一次 → 400 并关闭（`TransferEncodingInvalid`）。RFC 9112 §7 禁止发送方重复使用 chunked；重复的
+     TE 是 TE.TE 走私混淆的常见写法；Go（501）与 Node（400）都拒绝。
+  2. 多个 Host → 400（`ParseHeaderHost`，RFC 9112 §3.2 的 MUST；代理与源站可能各取一个）。缺少 Host 同属该 MUST，但 hyper 接受、移植自
+     hyper 的测试与本库低层客户端都不发 Host（默认拒绝时全量测试中 70 个失败），故默认接受，`Http1ServerConfig.requireHost = true` 时拒绝。
+  加固后：相同 128、本库更严 15、本库比某个参考宽 7（`te-gzip-chunked` 对 Go、`chunk-size-space`、`cl-twice-same`、`lowercase-method` 对
+  Node、`leading-crlf` 对 Go、`no-host` 对 Go 与 Node），无失败。
+- **差分测试自身发现的问题**：加固后多个 Host 起初"不应答、直接关闭"——新错误种类没有加入自动响应状态的映射（`autoStatus`）。已补上；
+  `AcceptanceTest.twoHostsAreRejected` 断言 400，去掉映射时失败。
+- **测试**：`RoleTest.chunkedMoreThanOnceIsRejected`、`hostRules`（去掉两条规则时都失败）、`AcceptanceTest.chunkedTwiceIsRejected`、
+  `twoHostsAreRejected`。macOS 全量 1270 个通过、14 个跳过。
 

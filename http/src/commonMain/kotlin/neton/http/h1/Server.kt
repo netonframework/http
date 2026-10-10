@@ -80,12 +80,18 @@ class Http1ServerConfig(
      * connection closes. A body already buffered with its head never arms it. Needs [StreamCapability.ReadTimeout].
      */
     val bodyReadTimeoutMillis: Long = 0,
+    /**
+     * ⚖️ true: an HTTP/1.1 request without a Host header is refused with 400 (RFC 9112 §3.2: a server MUST). Default
+     * false, as hyper (whose low-level client sends no Host either). A request with more than one Host is refused
+     * regardless (a proxy and an origin may each use a different one; hyper accepts it).
+     */
+    val requireHost: Boolean = false,
 ) {
     internal fun h1Config() = H1Config(
         parser = parser, maxHeaders = maxHeaders, maxHeaderSectionSize = maxHeaderSectionSize,
         maxRequestLineSize = maxRequestLineSize, lenientTeWithCl = lenientTeWithCl, titleCaseHeaders = titleCaseHeaders,
         preserveHeaderCase = preserveHeaderCase, maxRequestBodySize = maxRequestBodySize,
-        bodyReadTimeoutMillis = bodyReadTimeoutMillis,
+        bodyReadTimeoutMillis = bodyReadTimeoutMillis, requireHost = requireHost,
     )
 
     /** hyper `Builder::serve_connection`. */
@@ -112,10 +118,11 @@ class Http1ServerConfig(
         upgrades: Boolean = this.upgrades,
         admission: neton.io.core.Admission? = this.admission,
         bodyReadTimeoutMillis: Long = this.bodyReadTimeoutMillis,
+        requireHost: Boolean = this.requireHost,
     ) = Http1ServerConfig(
         halfClose, keepAlive, titleCaseHeaders, preserveHeaderCase, maxHeaders, headerReadTimeoutMillis,
         keepAliveIdleTimeoutMillis, writev, maxBufSize, autoDateHeader, pipelineFlush, parser, maxRequestLineSize,
-        maxHeaderSectionSize, lenientTeWithCl, maxRequestBodySize, upgrades, admission, bodyReadTimeoutMillis,
+        maxHeaderSectionSize, lenientTeWithCl, maxRequestBodySize, upgrades, admission, bodyReadTimeoutMillis, requireHost,
     )
 }
 

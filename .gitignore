@@ -3,3 +3,5 @@ build/
 .kotlin/
 local.properties
 http3-interop/h3-peer/target/
+http-bench/differential/hyper/target/
+http-bench/differential/go/probe

@@ -88,8 +88,9 @@ jobs:
 
   conformance:
     # External conformance (SPEC §6): h2spec 2.1.1 (pinned by SHA-256; it targets RFC 7540 / 7541) against the HTTP/2
-    # echo server, and curl interop over HTTP/1.x and h2c (http-bench/curl-interop.sh). Fails on any failure.
-    name: h2spec and curl (${{ matrix.driver }})
+    # echo server, curl interop over HTTP/1.x and h2c (http-bench/curl-interop.sh), and the HTTP/1 parsing differential
+    # against hyper 1.11.1, Go net/http and Node.js (http-bench/differential). Fails on any failure.
+    name: h2spec, curl and differential (${{ matrix.driver }})
     strategy:
       fail-fast: false
       matrix:
@@ -107,6 +108,13 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: gradle/actions/setup-gradle@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Cache Kotlin/Native toolchain
         uses: actions/cache@v4
         with:
@@ -128,10 +136,13 @@ jobs:
       - name: curl interop, h2c
         if: always()
         run: H2=1 ./http-bench/curl-interop.sh "$PWD/http-bench/build/bin/linuxX64/echoServerReleaseExecutable/echoServer.kexe" 3104 | tee curl-h2.txt; exit ${PIPESTATUS[0]}
+      - name: HTTP/1 parsing differential
+        if: always()
+        run: ./http-bench/differential/run.sh "$PWD/http-bench/build/bin/linuxX64/echoServerReleaseExecutable/echoServer.kexe" 3200 | tee differential.txt; exit ${PIPESTATUS[0]}
       - name: Summary
         if: always()
         run: |
-          { echo "### h2spec and curl (${{ matrix.driver }})"; echo '```'; grep -E "tests, .* passed|^passed " h2spec.txt curl-h1.txt curl-h2.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### h2spec, curl and differential (${{ matrix.driver }})"; echo '```'; grep -E "tests, .* passed|^passed |cases, .* references" h2spec.txt curl-h1.txt curl-h2.txt differential.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -142,5 +153,7 @@ jobs:
             h2spec-server.log
             curl-h1.txt
             curl-h2.txt
+            differential.txt
+            *-probe.log
           if-no-files-found: ignore
 

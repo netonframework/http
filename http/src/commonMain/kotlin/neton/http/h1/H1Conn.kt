@@ -222,6 +222,7 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
             H1ParseError.TransferEncodingInvalid -> HttpError.Kind.ParseHeaderTransferEncodingInvalid
             H1ParseError.TransferEncodingUnexpected -> HttpError.Kind.ParseHeaderTransferEncodingUnexpected
             H1ParseError.TransferEncodingWithContentLength -> HttpError.Kind.ParseHeaderTransferEncodingWithContentLength
+            H1ParseError.Host -> HttpError.Kind.ParseHeaderHost
             H1ParseError.TooLarge -> HttpError.Kind.ParseTooLarge
             H1ParseError.Status -> HttpError.Kind.ParseStatus
             H1ParseError.Internal -> HttpError.Kind.ParseInternal
@@ -268,7 +269,8 @@ internal class H1Conn(val io: H1Io, val isServer: Boolean, val config: H1Config)
     private fun autoStatus(kind: HttpError.Kind): Int = when (kind) {
         HttpError.Kind.ParseMethod, HttpError.Kind.ParseHeaderToken, HttpError.Kind.ParseHeaderContentLengthInvalid,
         HttpError.Kind.ParseHeaderTransferEncodingInvalid, HttpError.Kind.ParseHeaderTransferEncodingUnexpected,
-        HttpError.Kind.ParseHeaderTransferEncodingWithContentLength, HttpError.Kind.ParseUri, HttpError.Kind.ParseVersion -> 400
+        HttpError.Kind.ParseHeaderTransferEncodingWithContentLength, HttpError.Kind.ParseHeaderHost, HttpError.Kind.ParseUri,
+        HttpError.Kind.ParseVersion -> 400
         HttpError.Kind.ParseTooLarge -> 431
         HttpError.Kind.ParseUriTooLong -> 414
         else -> 0
