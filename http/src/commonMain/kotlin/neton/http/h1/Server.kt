@@ -17,6 +17,7 @@ import neton.http.Method
 import neton.http.OnUpgrade
 import neton.http.Request
 import neton.http.Response
+import neton.http.isBodyTooLarge
 import neton.http.StatusCode
 import neton.http.Upgraded
 import neton.http.h1.parse.ParserConfig
@@ -344,12 +345,6 @@ class Http1Connection internal constructor(
         } finally {
             inFlight = false
         }
-    }
-
-    private fun Throwable.isBodyTooLarge(): Boolean {
-        var c: Throwable? = this
-        while (c != null) { if (c is HttpError && c.kind == HttpError.Kind.UserBodyTooLarge) return true; c = c.cause }
-        return false
     }
 
     // Inline into [exchange]: one continuation less per request.

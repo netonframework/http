@@ -15,9 +15,10 @@ import neton.io.core.monotonicNanos
 /**
  * hyper `Incoming::h2`: the body of [recv], with the declared [contentLength] (-1 when unknown) and the ping
  * [ping] recorder (released with the body). A stream that already ended with no length is an empty body; its stream
- * handle is released at once.
+ * handle is released at once. ⚖️ [maxSize] > 0 (a server's `maxRequestBodySize`): more data than that fails the read
+ * with [HttpError.Kind.UserBodyTooLarge] and releases the stream.
  */
-internal fun h2Incoming(recv: RecvStream, contentLength: Long, ping: Recorder, timer: BodyReadTimer? = null): Incoming {
+internal fun h2Incoming(recv: RecvStream, contentLength: Long, ping: Recorder, timer: BodyReadTimer? = null, maxSize: Long = 0): Incoming {
     var len = contentLength
     // If the stream is already EOS, the "unknown length" is clearly zero.
     val ended = recv.isEndStream
@@ -27,7 +28,7 @@ internal fun h2Incoming(recv: RecvStream, contentLength: Long, ping: Recorder, t
         ping.release()
         return Incoming.EMPTY
     }
-    return Incoming(H2BodySource(recv, len, ping, timer), 0, len)
+    return Incoming(H2BodySource(recv, len, ping, timer, maxSize), 0, len)
 }
 
 /** Reads an HTTP/2 body for an [Incoming] (`Kind::H2`). */
@@ -37,8 +38,10 @@ private class H2BodySource(
     private var remaining: Long,
     private val ping: Recorder,
     private val timer: BodyReadTimer?,
+    private val maxSize: Long,
 ) : Incoming.Source {
     private var dataDone = false
+    private var received = 0L
 
     override suspend fun readBodyFrame(generation: Int): Frame? {
         val r = recv ?: return null
@@ -55,6 +58,11 @@ private class H2BodySource(
                 throw HttpError(HttpError.Kind.Body, e)
             }
             if (bytes != null) {
+                received += bytes.size
+                if (maxSize > 0 && received > maxSize) {
+                    finish()
+                    throw HttpError(HttpError.Kind.UserBodyTooLarge)
+                }
                 try {
                     r.flowControl().releaseCapacity(bytes.size)
                 } catch (_: H2Error) {

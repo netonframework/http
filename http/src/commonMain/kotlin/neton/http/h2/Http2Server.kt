@@ -22,7 +22,9 @@ import neton.http.Incoming
 import neton.http.Method
 import neton.http.OnUpgrade
 import neton.http.Request
+import neton.http.EmptyBody
 import neton.http.Response
+import neton.http.isBodyTooLarge
 import neton.http.Upgraded
 import neton.http.h1.HttpDate
 import neton.http.h1.HttpService
@@ -65,6 +67,7 @@ class Http2ServerConfig {
     internal var handshakeTimeout: Duration? = null
     internal var idleTimeout: Duration? = null
     internal var bodyReadTimeout: Duration? = null
+    internal var maxRequestBodySize: Long = DEFAULT_MAX_REQUEST_BODY_SIZE
 
     /** Remotely reset streams allowed pending accept before GOAWAY ENHANCE_YOUR_CALM (null: the h2 default, 20). */
     fun maxPendingAcceptResetStreams(max: Int?) = apply { maxPendingAcceptResetStreams = max }
@@ -162,6 +165,18 @@ class Http2ServerConfig {
         bodyReadTimeout = timeout
     }
 
+    /**
+     * ⚖️ The most request body a stream may carry, as `Http1ServerConfig.maxRequestBodySize` (hyper and h2 have no
+     * limit); 0 for none. Default 10 MiB. A declared `content-length` over it is answered 413 without calling the
+     * service; a body that grows over it fails the service's read with [HttpError.Kind.UserBodyTooLarge], and a service
+     * that fails with it (raw or as a cause) before its response gets 413. The rest of the request is then refused
+     * with RST_STREAM(NO_ERROR) once the response is sent (RFC 9113 §8.1).
+     */
+    fun maxRequestBodySize(bytes: Long) = apply {
+        require(bytes >= 0) { "maxRequestBodySize must not be negative" }
+        maxRequestBodySize = bytes
+    }
+
     /** hyper `Builder::serve_connection`: the connection, to [Http2Connection.serve]. */
     fun serveConnection(stream: IoStream, service: HttpService): Http2Connection = serveConnection(stream, service, Bytes.EMPTY)
 
@@ -186,7 +201,7 @@ class Http2ServerConfig {
             keepAliveWhileIdle = true,
         )
         val timeouts = H2ServerTimeouts(handshakeTimeout, idleTimeout, bodyReadTimeout?.inWholeNanoseconds ?: 0L)
-        return Http2Connection(stream, service, builder, ping, dateHeader, replay, timeouts)
+        return Http2Connection(stream, service, builder, ping, dateHeader, replay, timeouts, maxRequestBodySize)
     }
 
     private companion object {
@@ -198,6 +213,7 @@ class Http2ServerConfig {
         const val DEFAULT_MAX_SEND_BUF_SIZE = 1024 * 400
         const val DEFAULT_SETTINGS_MAX_HEADER_LIST_SIZE = 1024 * 16
         const val DEFAULT_MAX_LOCAL_ERROR_RESET_STREAMS = 1024
+        const val DEFAULT_MAX_REQUEST_BODY_SIZE = 10L * 1024 * 1024
     }
 }
 
@@ -229,6 +245,7 @@ class Http2Connection internal constructor(
     private val dateHeader: Boolean,
     private val replay: Bytes = Bytes.EMPTY,
     private val timeouts: H2ServerTimeouts = H2ServerTimeouts.NONE,
+    private val maxRequestBodySize: Long = 0,
 ) {
     private var conn: neton.http.h2.server.Connection? = null
     private var closePending = false
@@ -360,7 +377,7 @@ class Http2Connection internal constructor(
         val body: Incoming
         var connect: ConnectParts? = null
         if (req.method != Method.CONNECT) {
-            body = h2Incoming(req.body, contentLength, ping, timeouts.bodyTimer())
+            body = h2Incoming(req.body, contentLength, ping, timeouts.bodyTimer(), maxRequestBodySize)
         } else {
             if (contentLength > 0) {
                 // "h2 connect request with non-zero body not supported"
@@ -376,7 +393,8 @@ class Http2Connection internal constructor(
             connect = ConnectParts(pending, ping, req.body)
         }
         // hyper converts h2's `Protocol` extension to its own; here they are one type.
-        val task = H2Stream(Request(req.parts, body), body, respond, connect)
+        val tooLarge = maxRequestBodySize > 0 && contentLength > maxRequestBodySize
+        val task = H2Stream(Request(req.parts, body), body, respond, connect, tooLarge)
         scope.launch(start = CoroutineStart.UNDISPATCHED) { task.run() }
         return true
     }
@@ -389,6 +407,8 @@ class Http2Connection internal constructor(
         private val body: Incoming,
         private val reply: SendResponse,
         private var connect: ConnectParts?,
+        /** ⚖️ The declared length is over maxRequestBodySize: 413 without calling the service. */
+        private val declaredTooLarge: Boolean = false,
     ) {
         private val watch = ResetWatch(reply.ref)
         private val serviceCall = InlineCall<H2Stream, Response<out Body>>(H2Stream::callService)
@@ -397,7 +417,7 @@ class Http2Connection internal constructor(
 
         suspend fun run() {
             try {
-                respond(awaitService() ?: return)
+                respond((if (declaredTooLarge) payloadTooLarge() else awaitService()) ?: return)
             } catch (e: CancellationException) {
                 // A reset seen by the watch ends the stream; a cancelled connection ends it too.
                 if (watch.reset == null) throw e
@@ -430,10 +450,15 @@ class Http2Connection internal constructor(
                 if (watch.reset != null || !currentCoroutineContext().isActive) throw e
                 serviceFailed(e)
             } catch (e: Throwable) {
+                // ⚖️ The body grew over maxRequestBodySize and the service failed with that: 413, as HTTP/1.
+                if (e.isBodyTooLarge()) return payloadTooLarge()
                 serviceFailed(e)
             }
             return null
         }
+
+        private fun payloadTooLarge(): Response<out Body> =
+            Response(neton.http.ResponseParts(status = neton.http.StatusCode.PAYLOAD_TOO_LARGE), EmptyBody)
 
         private fun serviceFailed(e: Throwable) {
             // "http2 service errored"

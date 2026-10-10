@@ -85,3 +85,10 @@ class HttpError(val kind: Kind, cause: Throwable? = null) : Exception(describe(k
             if (cause == null) kind.description else "${kind.description}: ${cause.message ?: cause::class.simpleName}"
     }
 }
+
+/** Whether this, or one of its causes, is a request body over the server's limit ([HttpError.Kind.UserBodyTooLarge]). */
+internal fun Throwable.isBodyTooLarge(): Boolean {
+    var c: Throwable? = this
+    while (c != null) { if (c is HttpError && c.kind == HttpError.Kind.UserBodyTooLarge) return true; c = c.cause }
+    return false
+}

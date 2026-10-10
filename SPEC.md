@@ -955,3 +955,17 @@ TimeoutCoroutine、Job 收尾、计时器与时钟读取）。改由本配置实
 - 测试：`ClientTest.aResponseBodyDroppedUnreadClosesTheConnection`（剩余部分未到：连接结束、对端读到 EOF）、
   `aResponseBodyDroppedWithItsRestBufferedIsDrained`（剩余部分已缓冲：连接承载下一个请求）；去掉客户端的接线时两项都超时失败。
   macOS arm64 全量 1261 个测试通过；tls-http 组合测试以 `--include-build ../http` 验证 HTTP/1 丢弃后服务端连接结束。
+
+### HTTP/2 服务端的请求体总量上限（2026-10-11）⚖️
+- 此前只有 HTTP/1 有 `maxRequestBodySize`（安全基线 10 MiB，§3.9）；HTTP/2 服务端（hyper / h2 均不限）对请求体总量没有上限，流控窗口只限
+  在途数据，不限总量。`Http2ServerConfig.maxRequestBodySize(bytes)` 补上，默认 10 MiB（与 HTTP/1 相同），0 为不限，负数被拒绝；自动协议
+  服务端把它交给 HTTP/2，与 HTTP/1 的同名配置各自生效。
+- 行为与 HTTP/1 一致：声明的 `content-length` 超限时不调用服务，直接回 413；未声明或分段到达的请求体累计超限时，服务的读取以
+  `HttpError(Kind.UserBodyTooLarge)` 失败并释放流句柄，服务因此失败（原样抛出或作为原因）且尚未作答时回 413（判断逻辑 `isBodyTooLarge`
+  从 HTTP/1 移到 `HttpError.kt` 共用）。响应发完而请求仍在发送时，h2 释放句柄的规则发出 RST_STREAM(NO_ERROR)，即 RFC 9113 §8.1 的
+  "提前响应后请客户端停止发送"。连接不受影响。
+- 测试 `h2/RequestBodyLimitTest`（真实 TCP，5 个）：声明 5000 字节、上限 1000 → 413 且服务未被调用，同一连接随后的请求正常；未声明、
+  分段发 1200 字节 → 413，连接继续；恰好 1000 字节照常读完；0 不限（20000 字节）；默认 10 MiB、负数被拒。同时去掉"声明超限"判断与
+  "服务因超限失败 → 413"分支时，前两项分别失败（服务等待不会到来的请求体而超时；流被以 INTERNAL_ERROR 复位）。macOS 全量 1266 个
+  通过、14 个跳过。
+
