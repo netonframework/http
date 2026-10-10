@@ -436,6 +436,10 @@ internal class HeaderBlock(
                     malformed = true
                 } else if (name == HeaderName.TE && !value.contentEquals("trailers")) {
                     malformed = true
+                } else if (value.length > 0 && (isSpOrHtab(value.byteAt(0)) || isSpOrHtab(value.byteAt(value.length - 1)))) {
+                    // ⚖️ RFC 9113 §8.2.1: a value MUST NOT start or end with SP or HTAB (RFC 7540 allowed it, so does h2;
+                    // nghttp2 refuses it): the message is malformed.
+                    malformed = true
                 } else {
                     reg = true
                     val size = decodedHeaderSize(name.length, value.length)
@@ -578,3 +582,5 @@ fun parseU64(src: ByteArray, offset: Int = 0, length: Int = src.size - offset): 
     }
     return ret
 }
+
+private fun isSpOrHtab(b: Byte): Boolean = b == ' '.code.toByte() || b == '\t'.code.toByte()

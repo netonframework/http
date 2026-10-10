@@ -993,3 +993,20 @@ TimeoutCoroutine、Job 收尾、计时器与时钟读取）。改由本配置实
 - **测试**：`RoleTest.chunkedMoreThanOnceIsRejected`、`hostRules`（去掉两条规则时都失败）、`AcceptanceTest.chunkedTwiceIsRejected`、
   `twoHostsAreRejected`。macOS 全量 1270 个通过、14 个跳过。
 
+### RFC 9113 相对 RFC 7540 的变化（2026-10-11）
+h2spec 2.1.1 按 RFC 7540 / 7541 检查；h2 与本库的注释引用 9113，但此前没有逐条核对 9113 改动过的条款。逐条现状：
+
+| RFC 9113 条款 | 相对 7540 的变化 | 本库 | 证据 |
+|---|---|---|---|
+| §8.2.1 字段名 | 明确禁止 0x00–0x20、大写、0x7f–0xff，冒号仅限伪头部 | 拒绝；与 h2 相同按**连接错误** PROTOCOL_ERROR（HPACK 表示解不出字段）。§8.1.1 要求流错误，连接错误是更强的反应；h2spec 两者都接受 | `Rfc9113FieldRulesTest` |
+| §8.2.1 字段值 NUL / CR / LF | 7540 已有 | 拒绝，连接错误（同上） | 同上 |
+| §8.2.1 字段值首尾 SP / HTAB | **新增**：MUST 视为 malformed | ⚖️ 此前接受（h2 接受）；现为 malformed，流错误 PROTOCOL_ERROR，请求与响应两个方向（nghttp2 同样拒绝） | 同上，去掉检查时失败 |
+| §8.2.2 连接专用头部、`te` 只能为 `trailers` | 不变 | 拒绝（malformed） | `HeaderBlockRulesTest` |
+| §8.1.1 `content-length` 与 DATA 不符 | 不变（措辞更明确） | malformed | `Recv`、h2 移植测试 |
+| §5.3 / §5.3.2 优先级 | 7540 的优先级方案**废弃**，PRIORITY 帧仍须解析 | 解析并忽略（h2 行为）；不发送 `SETTINGS_NO_RFC7540_PRIORITIES`，收到时按未知设置忽略 | h2spec 5.3.x |
+| §3.1 / §3.2 `Upgrade: h2c` | **移除** | 不支持升级（同 hyper）；h2c 只走先验知识 | — |
+| §8.3.1 `:authority` 与 Host 不一致 | **新增** SHOULD 视为 malformed | 不检查（h2 不检查）；记为差异 | — |
+| §8.5 扩展 CONNECT（RFC 8441） | 并入引用 | 支持（`enableConnectProtocol`） | h2 移植测试 |
+
+测试 `h2/codec/Rfc9113FieldRulesTest`（6 个）：字段以原始 HPACK 字面量写入，发送侧不做规范化。macOS 全量 1276 个通过。
+
