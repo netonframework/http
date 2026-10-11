@@ -22,7 +22,7 @@ kotlin {
     androidNativeArm64(); androidNativeArm32(); androidNativeX64(); androidNativeX86()
 
     sourceSets {
-        commonMain.dependencies { api("com.netonstream:io:0.3.2") }
+        commonMain.dependencies { api("com.netonstream:io:0.4.0") }
         commonTest.dependencies { implementation(kotlin("test")) }
     }
 }
