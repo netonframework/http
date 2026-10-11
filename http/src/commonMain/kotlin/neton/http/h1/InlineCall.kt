@@ -1,7 +1,9 @@
+@file:OptIn(kotlin.concurrent.atomics.ExperimentalAtomicApi::class)
+
 package neton.http.h1
 
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.concurrent.AtomicReference
+import kotlin.concurrent.atomics.AtomicReference
 import kotlin.coroutines.Continuation
 import kotlin.coroutines.CoroutineContext
 import kotlin.coroutines.EmptyCoroutineContext
@@ -35,21 +37,21 @@ internal class InlineCall<R, T>(function: suspend (R) -> T) : Continuation<T> {
      * [COROUTINE_SUSPENDED] (then call [await]). A synchronous failure is thrown here.
      */
     fun start(receiver: R): Any? {
-        state.value = null
+        state.store(null)
         return invoker.invoke(receiver, this)
     }
 
     /** Waits for a call that [start] reported as suspended; returns its value or throws its failure. */
     @Suppress("UNCHECKED_CAST")
     suspend fun await(): T {
-        if (state.value == null) {
+        if (state.load() == null) {
             suspendCancellableCoroutine<Unit> { c -> if (!state.compareAndSet(null, c)) c.resume(Unit) }
         }
-        return (state.value as Outcome).result.getOrThrow() as T
+        return (state.load() as Outcome).result.getOrThrow() as T
     }
 
     override fun resumeWith(result: Result<T>) {
-        val prev = state.getAndSet(Outcome(result))
+        val prev = state.exchange(Outcome(result))
         if (prev is kotlinx.coroutines.CancellableContinuation<*>) {
             @Suppress("UNCHECKED_CAST")
             (prev as kotlinx.coroutines.CancellableContinuation<Unit>).resume(Unit)

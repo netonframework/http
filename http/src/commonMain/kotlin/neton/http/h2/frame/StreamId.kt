@@ -7,6 +7,7 @@ package neton.http.h2.frame
  *
  * An inline value: passing one around does not allocate (unless it is made nullable or stored as `Any`).
  */
+@kotlin.jvm.JvmInline
 value class StreamId(val value: Int) : Comparable<StreamId> {
     init {
         // `From<u32>`: "invalid stream ID -- MSB is set".

@@ -9,6 +9,7 @@ package neton.http.h2.frame
  * `toString` is the reference's `Debug` form (the constant's name, or `Reason(<hex>)` for an unknown code);
  * [description] is its `Display` form.
  */
+@kotlin.jvm.JvmInline
 value class Reason(val code: Int) {
     /** A description of the error code (`Reason::description`). */
     fun description(): String = when (code) {

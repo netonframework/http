@@ -31,6 +31,7 @@ enum class Kind {
  * ⚖️ The reference's `Head` is a plain struct on the stack; here it is an inline value packing the three fields into
  * one Long, so parsing and encoding frame heads allocate nothing.
  */
+@kotlin.jvm.JvmInline
 value class Head private constructor(private val bits: Long) {
     constructor(kind: Kind, flag: Int, streamId: StreamId) :
         this((kind.ordinal.toLong() shl 40) or ((flag.toLong() and 0xff) shl 32) or streamId.value.toLong())

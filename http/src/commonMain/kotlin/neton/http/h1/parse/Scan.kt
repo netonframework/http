@@ -1,6 +1,6 @@
 package neton.http.h1.parse
 
-import kotlin.experimental.ExperimentalNativeApi
+import neton.http.header.loadLongLe
 
 // Byte classes and scanners of the HTTP/1 head parser (httparse 1.10.1 `lib.rs` byte maps and `simd/swar.rs`).
 //
@@ -57,10 +57,10 @@ private const val SPACES: Long = 0x2020202020202020L // ' ' repeated
 /**
  * Loads 8 bytes at [i] as one native (little-endian) word: byte `i` becomes the least significant byte. All
  * Kotlin/Native targets are little-endian, so this is the reference's `usize::from_ne_bytes` on a 64-bit target.
- * Kotlin/Native's `getLongAt` is a single unaligned load (with a bounds check).
+ * [loadLongLe]: one unaligned load on Kotlin/Native (with a bounds check).
  */
-@OptIn(ExperimentalNativeApi::class)
-internal fun loadWord(buf: ByteArray, i: Int): Long = buf.getLongAt(i)
+@Suppress("NOTHING_TO_INLINE")
+internal inline fun loadWord(buf: ByteArray, i: Int): Long = buf.loadLongLe(i)
 
 /**
  * `swar.rs offsetnz`: index (in memory order) of the first non-zero byte of [block], or [BLOCK_SIZE] if all bytes
