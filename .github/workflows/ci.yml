@@ -16,7 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: macOS kqueue, os: macos-14, task: macosArm64Test, driver: "", transport: "" }
+          - { name: macOS kqueue, os: macos-15, task: macosArm64Test, driver: "", transport: "" }
           - { name: Linux epoll, os: ubuntu-latest, task: linuxX64Test, driver: epoll, transport: "" }
           - { name: Linux epoll TCP, os: ubuntu-latest, task: linuxX64Test, driver: epoll, transport: tcp }
           - { name: Linux io_uring, os: ubuntu-latest, task: linuxX64Test, driver: iouring, transport: "" }
@@ -28,6 +28,9 @@ jobs:
       NETON_IO_DRIVER: ${{ matrix.driver }}
       NETON_HTTP_TEST_TRANSPORT: ${{ matrix.transport }}
     steps:
+      - name: Select supported Xcode
+        if: runner.os == 'macOS'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
@@ -69,9 +72,12 @@ jobs:
 
   build-all-targets:
     name: compile (all targets)
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
+      - name: Select supported Xcode
+        if: runner.os == 'macOS'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
@@ -102,6 +108,9 @@ jobs:
       H2SPEC_URL: https://github.com/summerwind/h2spec/releases/download/v2.1.1/h2spec_linux_amd64.tar.gz
       H2SPEC_SHA256: 12ab6fa40cd7eff75b943cca5cdc20ae58b105252007909eeadd2e4d5efb24d3
     steps:
+      - name: Select supported Xcode
+        if: runner.os == 'macOS'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
@@ -164,11 +173,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-15, windows-latest]
         jdk: ['8', '21']
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
+      - name: Select supported Xcode
+        if: runner.os == 'macOS'
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_16.4.app/Contents/Developer" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         id: test-jdk
